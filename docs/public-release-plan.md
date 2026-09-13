@@ -1,8 +1,9 @@
 # Public source-release preparation
 
-Status: source preparation complete. With explicit owner approval, the private
-GitHub repository was recreated and the local Git database replaced with a fresh
-single-commit snapshot. Repository visibility remains private.
+Status: public source launch complete on 2026-09-14 with explicit owner approval.
+Titan DSL was made public first, followed by Titan. The earlier history cleanup
+recreated the repository from a clean snapshot; subsequent commits contain only
+public-release work. See the [launch verification record](public-launch.md).
 
 ## Scope and baseline
 
@@ -50,7 +51,8 @@ Initial findings:
 6. **Review handoff.** Set GitHub description/topics; record exact results and
    outstanding owner decisions. The initial preparation-branch handoff was
    superseded by explicit owner authorization to recreate the private repository
-   and put the clean snapshot on `main`. Do not publish artifacts or change visibility.
+   and put the clean snapshot on `main`. Visibility was subsequently changed only
+   after separate owner authorization. Artifact publication remains out of scope.
 
 ## Completion criteria
 
@@ -139,7 +141,7 @@ non-fatal missing-comment/tag warnings; this is not complete API documentation.
 Private audit exports, logs, recovery copies, and source/history archives are
 outside the repository and must not be committed or uploaded.
 
-### Remaining visibility decisions
+### Visibility gates — completed 2026-09-14
 
 The authorized history cleanup removed the original repository's 41 PR records
 and old branches from the replacement repository. The original local Git database
@@ -149,14 +151,17 @@ claim to erase copies in other people's clones or the provider's internal backup
 License selection does not independently prove ownership of every contribution;
 retain third-party attribution and confirm provenance before distribution.
 
-1. **Private security contact:** establish a real confidential reporting route.
-   GitHub's private-reporting endpoint is unavailable for this private repository;
-   the policy documents a conditional route without inventing an email address.
-2. **Source access and visibility:** separately authorize publication of Titan
-   and ensure the required Titan DSL source is accessible. Both remain private.
-3. **Repository rules:** recheck required checks/rules at publication. Current
-   ruleset/protection API reads return an account-plan restriction; no workflows
-   are present, and no paid CI requirement has been introduced by this work.
+1. **Private security contact:** GitHub private vulnerability reporting is enabled
+   in both repositories; the security policies link directly to that channel.
+2. **Source access and visibility:** the owner authorized publication. Titan DSL
+   and Titan are public, in that order, with GPL-3.0-only licensing.
+3. **Repository rules:** `main` is protected against force pushes and deletion,
+   including administrator enforcement, with linear history and resolved review
+   conversations required. No CI checks or additional reviewer are mandatory.
+   GitHub Actions remains disabled in both repositories.
+4. **Security monitoring:** Dependabot alerts, secret scanning, and secret-scanning
+   push protection are enabled. Resolved dependency snapshots were submitted
+   directly without Actions; these need manual refresh after dependency changes.
 
 Registry publishing, a stable API release, production certification, and the
 experimental IDE's distribution review remain separate workstreams, not implied

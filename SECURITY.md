@@ -6,10 +6,11 @@ release branches or response-time SLA are offered.
 ## Reporting
 
 Do not post credentials, sensitive data, or exploit details in a public issue.
-If GitHub offers **Report a vulnerability**, use the repository's
+Use **Report a vulnerability** in the repository's Security tab, or the
 [private reporting channel](https://github.com/rbilleci/titan/security/advisories/new).
-If unavailable, request a private security contact without including sensitive
-details. The maintainer must establish that channel before you send the report.
+Private vulnerability reporting is enabled. If temporarily unavailable, request
+a private security contact without including sensitive details. The maintainer
+must establish that channel before you send the report.
 
 ## Trust boundaries
 

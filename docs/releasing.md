@@ -3,6 +3,9 @@
 Titan's public-source preparation is distinct from making the repository public,
 creating a tag/release, publishing artifacts, or certifying production workloads.
 
+The [public launch record](public-launch.md) captures the tested revisions,
+dependency audit, and limits of the initial source release.
+
 ## Candidate verification
 
 1. Confirm the project license/ownership and third-party notices. Check source,
@@ -18,6 +21,9 @@ creating a tag/release, publishing artifacts, or certifying production workloads
    dependencies, and packaged license/notice files. The root publishes no artifact.
 6. Review documentation links, feature/support claims, experimental exclusions,
    security contact, and repository metadata.
+   Audit resolved runtime, test, annotation-processor, and buildscript dependencies
+   against current advisories; refresh GitHub's manually submitted dependency
+   snapshots after dependency changes. Actions is intentionally disabled.
 7. Record results in the [preparation plan](public-release-plan.md) or release notes.
 
 ## Visibility gates requiring owner action
