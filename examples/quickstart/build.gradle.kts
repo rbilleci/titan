@@ -12,8 +12,8 @@ java { toolchain { languageVersion.set(JavaLanguageVersion.of(21)) } }
 dependencies {
     implementation("io.titan:titan-dsl:0.1.0")
     compileOnly("org.jspecify:jspecify:1.0.0")
-    titanJdbc("org.postgresql:postgresql:42.7.4")
-    titanJdbc("com.mysql:mysql-connector-j:8.4.0")
+    titanJdbc("org.postgresql:postgresql:42.7.13")
+    titanJdbc("com.mysql:mysql-connector-j:26.7.0")
 }
 
 val targetDialect = providers.gradleProperty("targetDialect").orElse("postgresql")

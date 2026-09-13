@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Update PostgreSQL JDBC to 42.7.13 and MySQL Connector/J to 26.7.0; constrain
+  transitive Commons Compress to 1.28.0. Update examples and driver guidance.
+- Patch vulnerable transitive libraries in the standalone IDE build tooling;
+  the IDE component remains experimental and is not a Marketplace release.
 - License project-owned files under GPL-3.0-only and preserve separate third-party notices.
 - Prepare source onboarding, documentation, project policies, and artifact metadata
   for a public early-access release.

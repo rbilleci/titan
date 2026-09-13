@@ -25,7 +25,7 @@ public class TitanGradlePlugin implements Plugin<Project> {
     /**
      * Resolvable configuration the introspection tasks ({@code titanIntrospect},
      * {@code titanGenerate}) load JDBC drivers from in JDBC mode:
-     * {@code dependencies { titanJdbc("org.postgresql:postgresql:42.7.4") }}.
+     * {@code dependencies { titanJdbc("org.postgresql:postgresql:42.7.13") }}.
      */
     public static final String JDBC_CONFIGURATION_NAME = "titanJdbc";
 

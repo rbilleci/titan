@@ -31,7 +31,7 @@ java { toolchain { languageVersion.set(JavaLanguageVersion.of(21)) } }
 dependencies {
     implementation("io.titan:titan-dsl:0.1.0")
     compileOnly("org.jspecify:jspecify:1.0.0")
-    titanJdbc("org.postgresql:postgresql:42.7.4")
+    titanJdbc("org.postgresql:postgresql:42.7.13")
 }
 titan {
     database {

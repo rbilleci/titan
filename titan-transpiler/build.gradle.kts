@@ -24,8 +24,7 @@ dependencies {
     testImplementation(libs.testcontainers.postgresql)
     testImplementation(libs.testcontainers.mysql)
     testRuntimeOnly(libs.postgresql)
-    // Was mysql-connector-j 9.0.0 while every other module used 8.4.0; aligned to the
-    // catalog's 8.4.0 LTS (see gradle/libs.versions.toml for the rationale).
+    // Keep the test driver aligned with the shared, security-reviewed version.
     testRuntimeOnly(libs.mysql.connector.j)
 }
 

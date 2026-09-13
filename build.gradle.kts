@@ -55,6 +55,15 @@ subprojects {
     }
 
     plugins.withId("java") {
+        dependencies {
+            constraints {
+                val scope = if (project.name in listOf("titan-management", "titan-management-routines"))
+                    "testImplementation" else "implementation"
+                add(scope, rootProject.libs.commons.compress) {
+                    because("Avoid vulnerable archive handling pulled transitively by Testcontainers")
+                }
+            }
+        }
         extensions.configure<JavaPluginExtension> {
             toolchain {
                 languageVersion.set(JavaLanguageVersion.of(21))

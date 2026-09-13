@@ -1,15 +1,5 @@
-# Central version catalog (audit G-12, plan 4.5).
-#
-# Version decisions:
-# - junit: 5.10.2 — already the de-facto version in every module; centralised, not bumped
-#   (version bumps are deliberate, separate changes).
-# - mysql-connector-j: 8.4.0 everywhere. The repo had 8.4.0 (titan-runtime-jdbc,
-#   titan-gradle-plugin) and 9.0.0 (titan-transpiler testRuntimeOnly) side by side. 8.4.x is the
-#   LTS line and matches the mysql:8.4 Testcontainers image the suites run against; 9.0.0 is an
-#   innovation release with a short support window. Aligned down to the LTS.
-# - testcontainers: 1.21.4 — already uniform; centralised.
-# - errorprone: build-time-only static analysis (never a runtime dependency of any module,
-#   per the no-framework-dependencies rule).
+# Shared dependencies. Driver updates are verified against PostgreSQL 16 and MySQL 8.4.
+# Connector/J uses calendar versioning from 26.7.0; this is a driver version, not a server target.
 
 [versions]
 junit = "5.10.2"
@@ -17,14 +7,16 @@ junit4 = "4.13.2"
 mockito = "5.12.0"
 archunit = "1.3.0"
 testcontainers = "1.21.4"
-postgresql = "42.7.4"
-mysql = "8.4.0"
+commons-compress = "1.28.0"
+postgresql = "42.7.13"
+mysql = "26.7.0"
 jmh = "1.37"
 errorprone = "2.41.0"
 errorprone-plugin = "4.3.0"
 intellij-plugin = "1.17.4"
 
 [libraries]
+commons-compress = { module = "org.apache.commons:commons-compress", version.ref = "commons-compress" }
 junit-bom = { module = "org.junit:junit-bom", version.ref = "junit" }
 junit-jupiter = { module = "org.junit.jupiter:junit-jupiter" }
 junit-jupiter-api = { module = "org.junit.jupiter:junit-jupiter-api", version.ref = "junit" }

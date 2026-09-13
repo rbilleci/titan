@@ -1,5 +1,18 @@
 import java.util.Properties
 
+// Patch vulnerable transitive build-tool libraries without changing the experimental
+// IntelliJ platform target. These are Gradle build dependencies, not plugin runtime APIs.
+buildscript {
+    repositories { mavenCentral() }
+    dependencies {
+        classpath(platform("com.fasterxml.jackson:jackson-bom:2.18.9"))
+        classpath("com.squareup.okhttp3:okhttp:4.12.0")
+        classpath("org.jsoup:jsoup:1.23.2")
+        classpath("com.google.guava:guava:33.4.0-jre")
+        classpath("org.apache.commons:commons-lang3:3.18.0")
+    }
+}
+
 // Standalone experimental build: Gradle 8, Java 17, and JUnit 4, independent of
 // the core Java 21 build. See ../docs/intellij-plugin-bootstrap.md.
 plugins {
