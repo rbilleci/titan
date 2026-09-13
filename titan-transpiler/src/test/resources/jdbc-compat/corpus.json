@@ -1,0 +1,115 @@
+{
+  "schemaVersion": 1,
+  "sqlSafety": "strict",
+  "totals": {
+    "methods": 4,
+    "transpilable": 1,
+    "passthrough": 1,
+    "rejected": 2,
+    "usageTranspilable": 3,
+    "usagePassthrough": 1,
+    "usageRejected": 3
+  },
+  "byIdiom": {
+    "CALLABLE_STATEMENT": 2,
+    "I_2": 1,
+    "I_3": 1,
+    "I_4": 1,
+    "I_R1": 2
+  },
+  "byCode": {
+    "TITAN-E001": 2,
+    "TITAN-E004": 1
+  },
+  "methods": [
+    {
+      "class": "Corpus",
+      "method": "callsProc",
+      "file": "build/jdbc-compat-fixtures/Corpus.java",
+      "line": 30,
+      "kind": "STORED_PROCEDURE",
+      "rollup": "REJECTED",
+      "usages": [
+        {
+          "idiom": "CALLABLE_STATEMENT",
+          "classification": "REJECTED",
+          "location": "build/jdbc-compat-fixtures/Corpus.java:32",
+          "code": "TITAN-E001",
+          "reason": "CallableStatement / prepareCall is not supported; call the target Java method directly (docs/transpilable-jdbc-subset.md §5.1)"
+        },
+        {
+          "idiom": "CALLABLE_STATEMENT",
+          "classification": "REJECTED",
+          "location": "build/jdbc-compat-fixtures/Corpus.java:33",
+          "code": "TITAN-E001",
+          "reason": "CallableStatement is not supported; call the target Java method directly so Titan lowers it to a CallStatement (docs/transpilable-jdbc-subset.md §5.1)"
+        }
+      ]
+    },
+    {
+      "class": "Corpus",
+      "method": "cleanRead",
+      "file": "build/jdbc-compat-fixtures/Corpus.java",
+      "line": 5,
+      "kind": "STORED_PROCEDURE",
+      "rollup": "TRANSPILABLE",
+      "usages": [
+        {
+          "idiom": "I_2",
+          "classification": "TRANSPILABLE",
+          "location": "build/jdbc-compat-fixtures/Corpus.java:8",
+          "code": null,
+          "reason": null
+        },
+        {
+          "idiom": "I_3",
+          "classification": "TRANSPILABLE",
+          "location": "build/jdbc-compat-fixtures/Corpus.java:9",
+          "code": null,
+          "reason": null
+        },
+        {
+          "idiom": "I_4",
+          "classification": "TRANSPILABLE",
+          "location": "build/jdbc-compat-fixtures/Corpus.java:10",
+          "code": null,
+          "reason": null
+        }
+      ]
+    },
+    {
+      "class": "Corpus",
+      "method": "legacyDynamic",
+      "file": "build/jdbc-compat-fixtures/Corpus.java",
+      "line": 15,
+      "kind": "STORED_PROCEDURE",
+      "rollup": "PASSTHROUGH",
+      "usages": [
+        {
+          "idiom": "I_R1",
+          "classification": "PASSTHROUGH",
+          "location": "build/jdbc-compat-fixtures/Corpus.java:20",
+          "code": null,
+          "reason": "non-constant SQL text accepted as a single-dialect RawSql passthrough (permissive scope; docs/transpilable-jdbc-subset.md §4)"
+        }
+      ]
+    },
+    {
+      "class": "Corpus",
+      "method": "strictSplice",
+      "file": "build/jdbc-compat-fixtures/Corpus.java",
+      "line": 23,
+      "kind": "STORED_PROCEDURE",
+      "rollup": "REJECTED",
+      "usages": [
+        {
+          "idiom": "I_R1",
+          "classification": "REJECTED",
+          "location": "build/jdbc-compat-fixtures/Corpus.java:27",
+          "code": "TITAN-E004",
+          "reason": "SQL injection risk. The SQL text passed to prepareStatement(...)/execute(...) is built from a runtime value, so it is not a compile-time constant. In strict scope (the default) raw runtime values may not be spliced into SQL text. (a) Why blocked: concatenating a runtime value into SQL text is the classic SQL-injection vector. (b) Safe alternative for this case: keep the SQL text constant and BIND the value as a parameter (prepareStatement(\"... WHERE col = ?\"); ps.setLong(1, value)). For a dynamic IN-list use the safe forms in §3.6 (PostgreSQL WHERE id = ANY(?) array bind, or IN (SELECT ...) subquery fusion). (c) Escape hatch: annotate this method @SqlSafety(PERMISSIVE) to transpile it as-is as a RawSql passthrough (the rest of the build stays strict); for bulk migration set sqlSafety=permissive in the titan{} build config. Either way only the constant-text rule is relaxed; bound values stay parameterized, and passthrough is single-dialect (D1). (docs/transpilable-jdbc-subset.md §5.3)"
+        }
+      ]
+    }
+  ]
+}

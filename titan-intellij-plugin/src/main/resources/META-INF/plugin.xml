@@ -1,0 +1,15 @@
+<idea-plugin>
+    <id>io.titan.intellij</id>
+    <name>Titan IntelliJ Plugin</name>
+    <vendor url="https://github.com/rbilleci/titan">Titan</vendor>
+
+    <description>Experimental IntelliJ support for Titan SQL workflows.</description>
+
+    <depends>com.intellij.modules.java</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <completion.contributor language="JAVA" implementationClass="io.titan.intellij.TitanDslCompletionContributor"/>
+        <localInspection language="JAVA" shortName="TitanUnsupportedFeature" displayName="Titan unsupported feature" groupName="Titan" enabledByDefault="true" level="ERROR" implementationClass="io.titan.intellij.TitanUnsupportedFeatureInspection"/>
+        <codeInsight.lineMarkerProvider language="JAVA" implementationClass="io.titan.intellij.TitanSqlPreviewLineMarkerProvider"/>
+    </extensions>
+</idea-plugin>

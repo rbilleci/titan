@@ -1,0 +1,9 @@
+CREATE OR REPLACE FUNCTION "test"."render_boolean"(p_flag BOOLEAN)
+RETURNS TEXT
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $$
+BEGIN
+    RETURN CAST(p_flag AS TEXT);
+END;
+$$;
