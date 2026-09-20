@@ -2,7 +2,7 @@
 .kotlin/
 build/
 .idea/
-.claude/
+.claude/settings.local.json
 *.iml
 .classpath
 .project
