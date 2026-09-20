@@ -2,7 +2,6 @@
 .kotlin/
 build/
 .idea/
-.claude/
 *.iml
 .classpath
 .project
