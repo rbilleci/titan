@@ -3,7 +3,6 @@ package io.titan.transpiler.tir;
 import com.sun.source.tree.ArrayAccessTree;
 import com.sun.source.tree.BinaryTree;
 import com.sun.source.tree.BlockTree;
-import com.sun.source.tree.CompilationUnitTree;
 import com.sun.source.tree.ConditionalExpressionTree;
 import com.sun.source.tree.ExpressionStatementTree;
 import com.sun.source.tree.ExpressionTree;
@@ -69,12 +68,29 @@ final class ExpressionLowerer {
 
     private static final ThreadLocal<JdbcRowReadResolver> JDBC_ROW_READS = new ThreadLocal<>();
 
+    /** Compile-time substitution used while a JDBC binder helper is inlined into its caller. */
+    interface InlineVariableResolver {
+        ExpressionNode resolve(Element element);
+    }
+
+    private static final ThreadLocal<InlineVariableResolver> INLINE_VARIABLES = new ThreadLocal<>();
+
     static JdbcRowReadResolver swapJdbcRowReads(JdbcRowReadResolver resolver) {
         JdbcRowReadResolver previous = JDBC_ROW_READS.get();
         if (resolver == null) {
             JDBC_ROW_READS.remove();
         } else {
             JDBC_ROW_READS.set(resolver);
+        }
+        return previous;
+    }
+
+    static InlineVariableResolver swapInlineVariables(InlineVariableResolver resolver) {
+        InlineVariableResolver previous = INLINE_VARIABLES.get();
+        if (resolver == null) {
+            INLINE_VARIABLES.remove();
+        } else {
+            INLINE_VARIABLES.set(resolver);
         }
         return previous;
     }
@@ -320,6 +336,26 @@ final class ExpressionLowerer {
                     .toList(), null);
         }
 
+        if (invocation.getMethodSelect() instanceof MemberSelectTree select
+                && isTitanDslTextOwner(select.getExpression().toString(), resolvedMethod)
+                && ("base64UrlEncodeUtf8".contentEquals(select.getIdentifier())
+                        || "base64UrlDecodeUtf8".contentEquals(select.getIdentifier())
+                        || "base64UrlAlphabetIndex".contentEquals(select.getIdentifier()))) {
+            List<ExpressionNode> args = invocation.getArguments().stream()
+                    .map(arg -> lowerExpression(arg, parsedSources))
+                    .toList();
+            return switch (select.getIdentifier().toString()) {
+                case "base64UrlEncodeUtf8" -> staticSingleArgFunction(
+                        "__titan_text_base64url_encode_utf8", args, "Text.base64UrlEncodeUtf8");
+                case "base64UrlDecodeUtf8" -> staticSingleArgFunction(
+                        "__titan_text_base64url_decode_utf8", args, "Text.base64UrlDecodeUtf8");
+                case "base64UrlAlphabetIndex" -> staticSingleArgFunction(
+                        "__titan_text_base64url_alphabet_index", args, "Text.base64UrlAlphabetIndex");
+                // Internal invariant: the enclosing name guard admits exactly these three methods.
+                default -> throw new IllegalStateException("internal: unreachable Titan text intrinsic");
+            };
+        }
+
         if (invocation.getMethodSelect() instanceof MemberSelectTree select) {
             String method = select.getIdentifier().toString();
             String owner = select.getExpression().toString();
@@ -336,9 +372,10 @@ final class ExpressionLowerer {
                 return recordAccessor;
             }
             if (resolvedSignature != null && isSourceLocalConcreteInstanceHelper(resolvedMethod, parsedSources)) {
-                return new FunctionCallExpression(resolvedSignature, invocation.getArguments().stream()
-                        .map(arg -> lowerExpression(arg, parsedSources))
-                        .toList(), null);
+                return new FunctionCallExpression(
+                        resolvedSignature,
+                        lowerRoutineArguments(invocation, resolvedMethod, parsedSources),
+                        null);
             }
             if ("now".equals(method) && (resolvedMethod == null || isJavaTimeMethod(resolvedMethod))) {
                 if ("LocalDate".equals(owner)) {
@@ -356,6 +393,14 @@ final class ExpressionLowerer {
                 if ("ZonedDateTime".equals(owner)) {
                     return new FunctionCallExpression("__titan_time_zoneddatetime_now", List.of(), null);
                 }
+            }
+            if ("ofEpochMilli".equals(method) && "Instant".equals(owner)
+                    && (resolvedMethod == null || isJavaTimeMethod(resolvedMethod))) {
+                List<ExpressionNode> args = invocation.getArguments().stream()
+                        .map(arg -> lowerExpression(arg, parsedSources))
+                        .toList();
+                return staticSingleArgFunction("__titan_time_instant_of_epoch_millis", args,
+                        "Instant.ofEpochMilli");
             }
             if ("zero".equals(method) && (resolvedMethod == null || isJavaTimeMethod(resolvedMethod))) {
                 if (isDurationOwner(owner)) {
@@ -434,7 +479,10 @@ final class ExpressionLowerer {
             }
             if (resolvedSignature != null && resolvedMethod != null
                     && resolvedMethod.getModifiers().contains(Modifier.STATIC)) {
-                return new FunctionCallExpression(resolvedSignature, args, null);
+                return new FunctionCallExpression(
+                        resolvedSignature,
+                        lowerRoutineArguments(invocation, resolvedMethod, parsedSources),
+                        null);
             }
             if ("equals".equals(method) && args.size() == 1) {
                 // Null-safe equality pseudo-intrinsic: both emitters rewrite a two-argument
@@ -463,9 +511,47 @@ final class ExpressionLowerer {
                     "Declare the helper in the transpiled source set (static, or an instance method "
                             + "of a final class), or replace the call with a supported SQL/DSL construct");
         }
-        return new FunctionCallExpression(resolvedSignature, invocation.getArguments().stream()
-                .map(arg -> lowerExpression(arg, parsedSources))
-                .toList(), null);
+        return new FunctionCallExpression(
+                resolvedSignature,
+                lowerRoutineArguments(invocation, resolvedMethod, parsedSources),
+                null);
+    }
+
+    /**
+     * Lowers the data arguments of a call to another emitted routine.
+     *
+     * <p>{@code Connection} and {@code DataSource} parameters are Java/JDBC infrastructure anchors:
+     * {@link TranspilationPipeline#routineParametersFor} omits them from the emitted SQL routine
+     * signature because the called routine executes in the same database session. Calls must apply
+     * the identical positional omission or the SQL invocation and declaration arities diverge.</p>
+     */
+    private static List<ExpressionNode> lowerRoutineArguments(
+            MethodInvocationTree invocation,
+            ExecutableElement resolvedMethod,
+            ParsedSources parsedSources
+    ) {
+        List<? extends ExpressionTree> arguments = invocation.getArguments();
+        List<? extends VariableElement> parameters = resolvedMethod == null
+                ? List.of()
+                : resolvedMethod.getParameters();
+        List<ExpressionNode> lowered = new ArrayList<>(arguments.size());
+        for (int i = 0; i < arguments.size(); i++) {
+            if (i < parameters.size() && isRoutineInfrastructureParameter(parameters.get(i))) {
+                continue;
+            }
+            lowered.add(lowerExpression(arguments.get(i), parsedSources));
+        }
+        return List.copyOf(lowered);
+    }
+
+    private static boolean isRoutineInfrastructureParameter(VariableElement parameter) {
+        if (!(parameter.asType() instanceof DeclaredType declaredType)
+                || !(declaredType.asElement() instanceof TypeElement typeElement)) {
+            return false;
+        }
+        String qualifiedName = typeElement.getQualifiedName().toString();
+        return "java.sql.Connection".equals(qualifiedName)
+                || "javax.sql.DataSource".equals(qualifiedName);
     }
 
     // ------------------------------------------------------------------
@@ -487,7 +573,7 @@ final class ExpressionLowerer {
 
     private static final String SUPPORTED_TIME_METHODS =
             "now, plusDays, minusDays, plusHours, minusHours, plus, minus, toLocalDate, "
-                    + "toLocalTime, toInstant, compareTo, equals, and the Duration/Period factories "
+                    + "toLocalTime, toInstant, Instant.ofEpochMilli, compareTo, equals, and the Duration/Period factories "
                     + "(zero, ofDays, ofHours, ofMinutes, ofSeconds, ofMonths, ofYears)";
 
     private static final String SUPPORTED_OPTIONAL_METHODS =
@@ -793,10 +879,18 @@ final class ExpressionLowerer {
 
     private static ExpressionNode lowerIdentifierExpression(IdentifierTree identifierTree, ParsedSources parsedSources) {
         TreePath identifierPath = LowererSupport.resolveTreePath(parsedSources, identifierTree);
+        Element element = null;
         if (identifierPath != null) {
-            Element element = parsedSources.trees().getElement(identifierPath);
+            element = parsedSources.trees().getElement(identifierPath);
             if (element != null && element.getKind() == ElementKind.ENUM_CONSTANT) {
                 return new LiteralExpression(element.getSimpleName().toString(), new TTextType());
+            }
+        }
+        InlineVariableResolver inlineVariables = INLINE_VARIABLES.get();
+        if (inlineVariables != null && element != null) {
+            ExpressionNode replacement = inlineVariables.resolve(element);
+            if (replacement != null) {
+                return replacement;
             }
         }
         ExpressionNode foldedConstant = foldStaticFinalCompileTimeConstant(identifierTree, parsedSources);
@@ -931,6 +1025,17 @@ final class ExpressionLowerer {
         return "java.lang.String".equals(rendered);
     }
 
+    /** Recognizes the deliberately small portable text-intrinsic surface from titan-dsl. */
+    private static boolean isTitanDslTextOwner(String ownerText, ExecutableElement resolvedMethod) {
+        if (isMethodOwnedBy(resolvedMethod, "titan.dsl.Text")) {
+            return true;
+        }
+        // Source-only lowering tests can intentionally omit the DSL classpath.  Keep that
+        // behavior deterministic for the unambiguous qualified/imported owner spellings while
+        // resolved production calls remain constrained to titan.dsl.Text above.
+        return resolvedMethod == null && ("Text".equals(ownerText) || "titan.dsl.Text".equals(ownerText));
+    }
+
     private static boolean isOptionalMethod(ExecutableElement resolvedMethod, String ownerText) {
         if (resolvedMethod != null) {
             String owner = resolvedMethod.getEnclosingElement().toString();
@@ -1020,7 +1125,14 @@ final class ExpressionLowerer {
     }
 
     private static ExpressionNode lowerStringEquals(ExpressionNode receiver, List<ExpressionNode> args) {
-        ExpressionNode comparison = singleArgBinary(receiver, args, BinaryOperator.EQUAL, "equals");
+        // Java String.equals is a byte/code-point exact comparison.  A plain SQL text `=`
+        // inherits the database collation, which can make "Query" equal "query" under
+        // MySQL's common case-insensitive collations.  Keep it as a distinct intrinsic so each
+        // dialect can compare the encoded text bytes rather than silently weakening Java
+        // semantics.  The surrounding null handling intentionally preserves the existing
+        // lowered contract: a null argument or nullable receiver produces false here.
+        ExpressionNode comparison = new FunctionCallExpression(
+                "__titan_str_equals", prepend(receiver, args), null);
         ExpressionNode nullAwareComparison = new CaseWhenExpression(
                 List.of(new CaseBranch(new IsNullExpression(args.getFirst()), new LiteralExpression(false, new TBooleanType()))),
                 comparison
@@ -1416,13 +1528,7 @@ final class ExpressionLowerer {
     }
 
     private static TypeMirror resolveTreeType(Tree tree, ParsedSources parsedSources) {
-        for (CompilationUnitTree compilationUnit : parsedSources.compilationUnits()) {
-            TreePath path = TreePath.getPath(compilationUnit, tree);
-            if (path != null) {
-                return parsedSources.trees().getTypeMirror(path);
-            }
-        }
-        return null;
+        return typeMirror(parsedSources, tree);
     }
 
     private static ExpressionNode tryFoldNumericLiterals(ExpressionNode left, BinaryOperator operator, ExpressionNode right) {
@@ -1482,7 +1588,7 @@ final class ExpressionLowerer {
             return new TBigintType();
         }
         if (value instanceof Float || value instanceof Double) {
-            return new TNumericType(38, 10);
+            return new TDoubleType();
         }
         if (value instanceof Boolean) {
             return new TBooleanType();

@@ -217,6 +217,7 @@ public record StructuredOutputPlan(ObjectValue root) {
                 || type instanceof TTextType
                 || type instanceof TBooleanType
                 || type instanceof TNumericType
+                || type instanceof TDoubleType
                 || type instanceof TDateType
                 || type instanceof TTimeType
                 || type instanceof TTimestampType

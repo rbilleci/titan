@@ -5,16 +5,20 @@ RETURNS TEXT
 SQL SECURITY INVOKER
 BEGIN
     DECLARE __titan_saved_time_zone VARCHAR(64) DEFAULT @@session.time_zone;
+    DECLARE __titan_time_zone_pinned BOOLEAN DEFAULT FALSE;
     DECLARE __titan_return_value TEXT;
     DECLARE EXIT HANDLER FOR SQLEXCEPTION
     BEGIN
-        SET time_zone = __titan_saved_time_zone;
+        IF __titan_time_zone_pinned THEN SET time_zone = __titan_saved_time_zone; END IF;
         RESIGNAL;
     END;
-    SET time_zone = '+00:00';
+    IF @@session.time_zone <> '+00:00' THEN
+        SET time_zone = '+00:00';
+        SET __titan_time_zone_pinned = TRUE;
+    END IF;
     SET __titan_return_value = CONCAT(COALESCE(CAST(CONCAT(COALESCE(CAST('{"hasNextPage":' AS CHAR), 'null'), COALESCE((CASE WHEN has_more(p_count, p_limit) IS NULL THEN NULL WHEN has_more(p_count, p_limit) THEN 'true' ELSE 'false' END), 'null')) AS CHAR), 'null'), COALESCE(CAST('}' AS CHAR), 'null'));
-    SET time_zone = __titan_saved_time_zone;
+    IF __titan_time_zone_pinned THEN SET time_zone = __titan_saved_time_zone; END IF;
     RETURN __titan_return_value;
-    SET time_zone = __titan_saved_time_zone;
+    IF __titan_time_zone_pinned THEN SET time_zone = __titan_saved_time_zone; END IF;
 END$$
 DELIMITER ;

@@ -26,7 +26,7 @@ general JDBC input.
 | Connection/DataSource infrastructure | Recognized infrastructure parameters/acquisition are elided from routine signatures. See `JdbcEndToEndTest`. |
 | Prepared statements and ordered setters | Use constant SQL and explicit bind positions/types. Supported shapes preserve value binding. |
 | Single-row reads | Read into supported locals before branching or returning. A direct getter in a return expression is not interchangeable with a recognized INTO target. |
-| Cursor loops | Recognized `while (rs.next())` loops lower with their supported body/control flow. |
+| Cursor loops | Recognized `while (rs.next())` loops lower with their supported body/control flow. A lexical inner cursor with constant bound SQL lowers as a nested cursor block; each cursor still has its own supported getter/control-flow constraints. |
 | Updates/inserts/deletes | Recognized `executeUpdate` paths lower into the native routine. |
 | Generated keys | Supported shapes require schema/key metadata and target-specific handling; see `JdbcGeneratedKeyResolverTest` and deployability tests. |
 | Guarded predicates, collection IN forms, UUIDs | Specific recognized patterns have dedicated tests. Do not generalize support to every collection/SQL-building API. |

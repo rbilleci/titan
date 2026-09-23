@@ -3805,7 +3805,9 @@ class JavaToTirLowererTest {
         assertInstanceOf(IsNullExpression.class, nullAwareEquals.conditions().getFirst().condition());
         LiteralExpression nullEqualsValue = assertInstanceOf(LiteralExpression.class, nullAwareEquals.conditions().getFirst().value());
         assertEquals(false, nullEqualsValue.value());
-        assertInstanceOf(BinaryOpExpression.class, nullAwareEquals.elseValue());
+        FunctionCallExpression stringEquals = assertInstanceOf(FunctionCallExpression.class, nullAwareEquals.elseValue());
+        assertEquals("__titan_str_equals", stringEquals.name());
+        assertEquals(2, stringEquals.arguments().size());
 
         FunctionCallExpression idx = initializer(block, "idx", FunctionCallExpression.class);
         assertEquals("__titan_str_index_of", idx.name());
@@ -3868,6 +3870,43 @@ class JavaToTirLowererTest {
         BinaryOpExpression add = assertInstanceOf(BinaryOpExpression.class, subtract.left());
         FunctionCallExpression c = assertInstanceOf(FunctionCallExpression.class, add.right());
         assertEquals("__titan_char_code", c.name());
+    }
+
+    @Test
+    void lowersTitanTextBase64UrlUtf8Intrinsics() throws Exception {
+        Path sourceFile = tempDir.resolve("LoweringTitanTextBase64Url.java");
+        Files.writeString(sourceFile, """
+                import titan.dsl.StoredFunction;
+                import titan.dsl.Text;
+
+                class LoweringTitanTextBase64Url {
+                    @StoredFunction
+                    public static String run(String input) {
+                        String encoded = Text.base64UrlEncodeUtf8(input);
+                        int alphabetIndex = Text.base64UrlAlphabetIndex('A');
+                        return Text.base64UrlDecodeUtf8(encoded + alphabetIndex);
+                    }
+                }
+                """);
+
+        JavaSourceParser parser = new JavaSourceParser();
+        ParsedSources parsed = parser.parse(List.of(sourceFile), List.of(), "21", false);
+        List<DiscoveredEntryPoint> entryPoints = new EntryPointDiscovery().discover(parsed);
+
+        Block block = new JavaToTirLowerer().lower(parsed, entryPoints).values().iterator().next();
+        DeclareVariable encoded = assertInstanceOf(DeclareVariable.class, block.declarations().getFirst());
+        assertEquals("__titan_text_base64url_encode_utf8",
+                assertInstanceOf(FunctionCallExpression.class, encoded.initializer()).name());
+        DeclareVariable alphabetIndex = assertInstanceOf(DeclareVariable.class, block.declarations().get(1));
+        assertEquals("__titan_text_base64url_alphabet_index",
+                assertInstanceOf(FunctionCallExpression.class, alphabetIndex.initializer()).name());
+        ReturnStatement returned = block.statements().stream()
+                .filter(ReturnStatement.class::isInstance)
+                .map(ReturnStatement.class::cast)
+                .findFirst()
+                .orElseThrow();
+        assertEquals("__titan_text_base64url_decode_utf8",
+                assertInstanceOf(FunctionCallExpression.class, returned.expression()).name());
     }
 
     @Test
@@ -4103,6 +4142,7 @@ class JavaToTirLowererTest {
                         LocalDateTime later = now.plusHours(3);
                         LocalDate justDate = now.toLocalDate();
                         Instant instantNow = Instant.now();
+                        Instant epochInstant = Instant.ofEpochMilli(1234L);
                         ZonedDateTime zonedNow = ZonedDateTime.now();
                         OffsetDateTime offsetNow = OffsetDateTime.now();
                         Instant fromZoned = zonedNow.toInstant();
@@ -4115,7 +4155,7 @@ class JavaToTirLowererTest {
         List<DiscoveredEntryPoint> entryPoints = new EntryPointDiscovery().discover(parsed);
 
         Block block = new JavaToTirLowerer().lower(parsed, entryPoints).values().iterator().next();
-        assertEquals(10, block.declarations().size());
+        assertEquals(11, block.declarations().size());
 
         DeclareVariable today = (DeclareVariable) block.declarations().get(0);
         FunctionCallExpression todayExpr = assertInstanceOf(FunctionCallExpression.class, today.initializer());
@@ -4138,15 +4178,20 @@ class JavaToTirLowererTest {
         assertEquals("__titan_time_instant_now", instantNowExpr.name());
         assertInstanceOf(TTimestampTzType.class, instantNow.type());
 
-        DeclareVariable zonedNow = (DeclareVariable) block.declarations().get(7);
+        DeclareVariable epochInstant = (DeclareVariable) block.declarations().get(7);
+        FunctionCallExpression epochInstantExpr = assertInstanceOf(FunctionCallExpression.class, epochInstant.initializer());
+        assertEquals("__titan_time_instant_of_epoch_millis", epochInstantExpr.name());
+        assertInstanceOf(TTimestampTzType.class, epochInstant.type());
+
+        DeclareVariable zonedNow = (DeclareVariable) block.declarations().get(8);
         FunctionCallExpression zonedNowExpr = assertInstanceOf(FunctionCallExpression.class, zonedNow.initializer());
         assertEquals("__titan_time_zoneddatetime_now", zonedNowExpr.name());
         assertInstanceOf(TTimestampTzType.class, zonedNow.type());
 
-        DeclareVariable offsetNow = (DeclareVariable) block.declarations().get(8);
+        DeclareVariable offsetNow = (DeclareVariable) block.declarations().get(9);
         assertInstanceOf(TTimestampTzType.class, offsetNow.type());
 
-        DeclareVariable fromZoned = (DeclareVariable) block.declarations().get(9);
+        DeclareVariable fromZoned = (DeclareVariable) block.declarations().get(10);
         FunctionCallExpression fromZonedExpr = assertInstanceOf(FunctionCallExpression.class, fromZoned.initializer());
         assertEquals("__titan_time_to_instant", fromZonedExpr.name());
         assertInstanceOf(TTimestampTzType.class, fromZoned.type());
@@ -5527,9 +5572,9 @@ class JavaToTirLowererTest {
         assertInstanceOf(TBigintType.class, widened.targetType());
         assertFalse(widened.truncating());
 
-        // int -> double: numeric widening to NUMERIC(38,10) per the type mapper.
+        // int -> double: widening to IEEE-754 binary64 per the type mapper.
         CastExpression promoted = assertInstanceOf(CastExpression.class, initializerOf(block, "promoted"));
-        assertInstanceOf(TNumericType.class, promoted.targetType());
+        assertInstanceOf(TDoubleType.class, promoted.targetType());
         assertFalse(promoted.truncating());
 
         // double -> long: Java truncates toward zero; the cast carries the truncating flag so

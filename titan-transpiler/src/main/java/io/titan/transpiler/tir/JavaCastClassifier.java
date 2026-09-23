@@ -169,7 +169,7 @@ public final class JavaCastClassifier {
         return switch (category) {
             case INT -> new TIntType();
             case LONG -> new TBigintType();
-            case FRACTIONAL -> new TNumericType(38, 10);
+            case FRACTIONAL -> new TDoubleType();
             // Internal-invariant assertion: only numeric categories emit a CAST.
             default -> throw new IllegalStateException("internal: no cast TIR type for category " + category);
         };

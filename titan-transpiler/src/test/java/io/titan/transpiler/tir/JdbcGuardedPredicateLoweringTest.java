@@ -129,13 +129,14 @@ class JdbcGuardedPredicateLoweringTest {
     @Test
     void emitsStaticGuardedPredicateOnMysql() throws Exception {
         String sql = transpile("FlagAccounts", SEARCH_BUILDER, "mysql");
-        // On MySQL the `?` placeholders stay `?` (positional), bound by the PREPARE/EXECUTE USING @p. The
-        // guarded predicate WHERE is identical SQL — `(? IS NULL OR col OP ?)`.
-        assertTrue(sql.contains("(? IS NULL OR status = ?)"),
-                "MySQL must emit the first clause as (? IS NULL OR status = ?); was:\n" + sql);
-        assertTrue(sql.contains("(? IS NULL OR balance >= ?)"),
-                "MySQL must emit the second clause as (? IS NULL OR balance >= ?); was:\n" + sql);
-        // Each param set into a session var twice (guard + comparison) — the USING binds p_status twice.
+        // MySQL can reference typed procedure parameters directly, so this fixed-shape statement does not
+        // need PREPARE/EXECUTE or session variables.
+        assertTrue(sql.contains("(p_status IS NULL OR status = p_status)"),
+                "MySQL must emit the first clause with the typed routine parameter; was:\n" + sql);
+        assertTrue(sql.contains("(p_min_balance IS NULL OR balance >= p_min_balance)"),
+                "MySQL must emit the second clause with the typed routine parameter; was:\n" + sql);
+        assertFalse(sql.contains("PREPARE") || sql.contains("@titan_p"),
+                "fixed-shape guarded SQL must remain native static SQL; was:\n" + sql);
         assertTrue(sql.toUpperCase(java.util.Locale.ROOT).contains("JSON_TABLE") == false,
                 "the guarded predicate must NOT use JSON_TABLE (it is not a collection bind); was:\n" + sql);
     }
@@ -300,9 +301,9 @@ class JdbcGuardedPredicateLoweringTest {
     @Test
     void orderedBuilderEmitsGuardsBeforeTailOnMysql() throws Exception {
         String sql = transpile("OrderedSearch", ORDERED_SEARCH_BUILDER, "mysql");
-        // Byte-golden: on MySQL the `?` stay positional; the guarded WHERE precedes the constant tail.
-        assertTrue(sql.contains("WHERE active = true AND (? IS NULL OR status = ?)"
-                        + " AND (? IS NULL OR balance >= ?) ORDER BY id DESC"),
+        // Byte-golden: typed parameters form a native static WHERE before the constant tail.
+        assertTrue(sql.contains("WHERE active = true AND (p_status IS NULL OR status = p_status)"
+                        + " AND (p_min_balance IS NULL OR balance >= p_min_balance) ORDER BY id DESC"),
                 "MySQL must emit the guards at the WHERE boundary, the ORDER BY tail after them; was:\n" + sql);
         assertFalse(sql.toUpperCase(java.util.Locale.ROOT).contains("JSON_TABLE"),
                 "the ordered guarded predicate must NOT use JSON_TABLE; was:\n" + sql);
@@ -526,8 +527,8 @@ class JdbcGuardedPredicateLoweringTest {
 
     @Test
     void emitsParameterizedPaginationStaticallyOnMysql() throws Exception {
-        // End-to-end emit (MySQL) of the LIMIT ?, ? comma form: positional ?s, no JSON_TABLE / format() — the
-        // pagination ?s are part of the same static PREPARE/EXECUTE substrate as the guards.
+        // End-to-end emit (MySQL) of the LIMIT ?, ? comma form: all recovered binds become typed routine
+        // parameter references in one native static statement.
         String source = """
                 import titan.dsl.StoredProcedure;
                 import java.sql.*;
@@ -549,8 +550,10 @@ class JdbcGuardedPredicateLoweringTest {
                 }
                 """;
         String sql = transpile("PagedFlagMy", source, "mysql");
-        assertTrue(sql.contains("(? IS NULL OR tier = ?) ORDER BY id DESC LIMIT ?, ?"),
-                "MySQL must emit the guard then the verbatim LIMIT ?, ? comma tail; was:\n" + sql);
+        assertTrue(sql.contains("(p_tier IS NULL OR tier = p_tier) ORDER BY id DESC LIMIT p_offset, p_page_size"),
+                "MySQL must emit the guard and pagination with typed routine parameters; was:\n" + sql);
+        assertFalse(sql.contains("PREPARE") || sql.contains("@titan_p"),
+                "fixed-shape pagination must remain native static SQL; was:\n" + sql);
         assertFalse(sql.toUpperCase(java.util.Locale.ROOT).contains("JSON_TABLE"),
                 "the paginated guarded predicate must NOT use JSON_TABLE; was:\n" + sql);
         assertFalse(sql.contains("format("),

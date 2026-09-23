@@ -1,6 +1,10 @@
 package io.titan.runtime.testing;
 
+import com.github.dockerjava.api.model.ExposedPort;
+import com.github.dockerjava.api.model.PortBinding;
+import com.github.dockerjava.api.model.Ports;
 import org.junit.jupiter.api.extension.ExtensionContext;
+import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.MySQLContainer;
 import org.testcontainers.containers.PostgreSQLContainer;
 
@@ -27,6 +31,9 @@ import java.time.Duration;
  */
 final class SharedContainers implements ExtensionContext.Store.CloseableResource {
 
+    static final String POSTGRES_HOST_PORT_ENV = "TITAN_TEST_POSTGRES_HOST_PORT";
+    static final String MYSQL_HOST_PORT_ENV = "TITAN_TEST_MYSQL_HOST_PORT";
+
     private static final ExtensionContext.Namespace NAMESPACE =
             ExtensionContext.Namespace.create(SharedContainers.class);
     private static final String STORE_KEY = "titan-shared-containers";
@@ -51,6 +58,7 @@ final class SharedContainers implements ExtensionContext.Store.CloseableResource
         if (postgres == null || !postgres.isRunning()) {
             PostgreSQLContainer<?> container = new PostgreSQLContainer<>("postgres:16")
                     .withStartupTimeout(Duration.ofMinutes(5));
+            applyOptionalHostPort(container, POSTGRES_HOST_PORT_ENV, 5432);
             postgres = container; // assigned before start: close() can stop a partial start
             container.start();
         }
@@ -60,13 +68,49 @@ final class SharedContainers implements ExtensionContext.Store.CloseableResource
     synchronized MySQLContainer<?> mysql() {
         if (mysql == null || !mysql.isRunning()) {
             MySQLContainer<?> container = new MySQLContainer<>("mysql:8.4")
-                    .withCommand("--log_bin_trust_function_creators=1", "--innodb-use-native-aio=0")
+                    // Generated, package-bound routines are intentionally deployed as complete
+                    // CREATE PROCEDURE statements. Keep the shared test server above the legacy
+                    // 1 MiB packet default and the former 16 MiB test ceiling so current package
+                    // closures are exercised rather than rejected by the JDBC transport before
+                    // MySQL parses them. Production installation still uses the package-sized
+                    // preflight and fails before SQL when its server is configured too low.
+                    .withCommand("--log_bin_trust_function_creators=1", "--innodb-use-native-aio=0",
+                            "--max_allowed_packet=64M")
                     .withStartupTimeout(Duration.ofMinutes(5));
+            applyOptionalHostPort(container, MYSQL_HOST_PORT_ENV, 3306);
             mysql = container; // assigned before start: close() can stop a partial start
             container.start();
             provisionMysqlRuntimeSchema(container);
         }
         return mysql;
+    }
+
+    /**
+     * Allows a caller to avoid Docker's random-port allocator when the host's ephemeral source
+     * ports are under sustained load. The normal path remains Docker-assigned; an override is
+     * deliberately explicit because the caller is then responsible for choosing a free port.
+     */
+    private static void applyOptionalHostPort(
+            GenericContainer<?> container,
+            String environmentVariable,
+            int containerPort
+    ) {
+        String configured = System.getenv(environmentVariable);
+        if (configured == null || configured.isBlank()) {
+            return;
+        }
+        int hostPort;
+        try {
+            hostPort = Integer.parseInt(configured);
+        } catch (NumberFormatException ex) {
+            throw new IllegalArgumentException(environmentVariable + " must be an integer TCP port", ex);
+        }
+        if (hostPort < 1 || hostPort > 65_535) {
+            throw new IllegalArgumentException(environmentVariable + " must be between 1 and 65535");
+        }
+        container.withCreateContainerCmdModifier(command -> command.getHostConfig().withPortBindings(
+                new PortBinding(Ports.Binding.bindIpAndPort("127.0.0.1", hostPort),
+                        ExposedPort.tcp(containerPort))));
     }
 
     /**

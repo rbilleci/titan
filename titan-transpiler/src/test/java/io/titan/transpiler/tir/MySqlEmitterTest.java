@@ -71,6 +71,16 @@ class MySqlEmitterTest {
     }
 
     @Test
+    void removesAbsolutePathsFromPublishedNullGuardProvenance() {
+        String sql = new MySqlEmitter().visitNullGuardStatement(
+                new NullGuardStatement("v_total", "/private/build-agent/workspace/secrets/Source.java:42"));
+
+        assertTrue(sql.contains("-- titan:source:Source.java:42"), sql);
+        assertTrue(sql.contains("NullPointerException at Source.java:42"), sql);
+        assertFalse(sql.contains("/private/build-agent"), sql);
+    }
+
+    @Test
     void rejectsUnrewrittenCompareToMarker() {
         // N2 invariant (plan 2.3): the __titan_compare_to marker emitted by the lowerer must be
         // rewritten (and null-guarded) by NullAnalysisPass; reaching the emitter means the pass
@@ -149,9 +159,11 @@ class MySqlEmitterTest {
                 true);
 
         int success = sql.indexOf("status = 'success'");
+        int restoreLastInsertId = sql.indexOf("DO LAST_INSERT_ID(__titan_saved_last_insert_id);", success);
         int stagedValue = sql.indexOf("SET __titan_return_value = 7;");
         int returnStatement = sql.indexOf("RETURN __titan_return_value;");
         assertTrue(success >= 0);
+        assertTrue(restoreLastInsertId > success, sql);
         // E-8: the return value is staged under UTC after the telemetry success UPDATE, the
         // caller's time zone is restored, then the staged value is returned.
         assertTrue(stagedValue > success);
@@ -630,7 +642,7 @@ class MySqlEmitterTest {
     }
 
     @Test
-    void emitsRawSqlWithMySqlPrepareExecuteBindings() {
+    void inlinesFixedShapeRawSqlBindingsAsRoutineLocals() {
         RawSql rawSql = new RawSql(
                 "SELECT * FROM accounts WHERE id = :accountId AND status = :status",
                 List.of("accountId", "status"),
@@ -638,19 +650,51 @@ class MySqlEmitterTest {
 
         String emitted = new MySqlEmitter().visitRawSql(rawSql);
 
-        assertTrue(emitted.contains("SET @titan_p1 = accountId;"));
-        assertTrue(emitted.contains("SET @titan_p2 = status;"));
-        assertTrue(emitted.contains("PREPARE titan_stmt_1 FROM 'SELECT * FROM accounts WHERE id = ? AND status = ?'"));
-        assertTrue(emitted.contains("EXECUTE titan_stmt_1 USING @titan_p1, @titan_p2;"));
-        assertTrue(emitted.contains("DEALLOCATE PREPARE titan_stmt_1"));
+        assertEquals("SELECT * FROM accounts WHERE id = accountId AND status = status", emitted);
+        assertFalse(emitted.contains("PREPARE"), emitted);
+        assertFalse(emitted.contains("@titan_"), emitted);
     }
 
     @Test
-    void emitsRawReadIntoAsSessionVarStagedSingleRowRead() {
-        // JDBC I-4 over unparsed text (WS-C Phase 2 §4, decisions 2 & 4): MySQL has no dynamic
-        // EXECUTE ... INTO, so each result column is captured via 'INTO @titan_rN' embedded in the
-        // PREPARE text and staged through session vars (pre-init NULL for no-row), then copied to
-        // the routine locals after DEALLOCATE.
+    void emitsFixedShapeRawSqlWithoutSessionStateAcrossStatements() {
+        MySqlEmitter emitter = new MySqlEmitter();
+        String first = emitter.visitRawSql(new RawSql(
+                "UPDATE accounts SET status = ? WHERE id = ?", List.of("p_status", "p_id"), "MYSQL"));
+        String second = emitter.visitRawSql(new RawSql(
+                "UPDATE accounts SET status = ? WHERE id = ?", List.of("p_status", "p_id"), "MYSQL"));
+
+        assertEquals("UPDATE accounts SET status = p_status WHERE id = p_id", first);
+        assertEquals(first, second);
+        assertFalse(first.contains("@titan_"), first);
+    }
+
+    @Test
+    void givesDynamicSqlSessionVariablesStableDeclaredTypesAcrossProcedureInvocations() {
+        Block body = new Block(
+                List.of(
+                        new DeclareVariable("p_account_id", new TBigintType(), true, null),
+                        new DeclareVariable("p_enabled", new TBooleanType(), true, null),
+                        new DeclareVariable("p_table", new TTextType(), false, null),
+                        new DeclareVariable("v_name", new TTextType(), true, null)),
+                List.of(
+                        new ExecuteSqlStatement(new RawSql(
+                                "UPDATE " + RawSql.spliceMarker(1) + " SET enabled = ? WHERE id = ?",
+                                List.of("p_enabled", "p_account_id"), "MYSQL", List.of(),
+                                List.of(new SpliceBind(1, "p_table", SpliceBind.Kind.IDENTIFIER)))),
+                        new RawReadIntoStatement(
+                                List.of("v_name"),
+                                new RawSql("SELECT name FROM accounts WHERE id = ?", List.of("p_account_id"), "MYSQL"))),
+                List.of());
+
+        String emitted = new MySqlEmitter().emitProcedure("app", "stable_dynamic_binds", SecurityMode.INVOKER, body);
+
+        assertTrue(emitted.contains("SET @titan_p1_1 = CAST(p_enabled AS UNSIGNED);"), emitted);
+        assertTrue(emitted.contains("SET @titan_p1_2 = CAST(p_account_id AS SIGNED);"), emitted);
+        assertTrue(emitted.contains("SELECT name INTO v_name FROM accounts WHERE id = p_account_id;"), emitted);
+    }
+
+    @Test
+    void emitsFixedShapeRawReadIntoAsStaticSingleRowRead() {
         RawReadIntoStatement node = new RawReadIntoStatement(
                 List.of("v_balance", "v_tier"),
                 new RawSql("SELECT balance, tier FROM accounts WHERE id = ?", List.of("p_account_id"), "MYSQL"));
@@ -658,15 +702,29 @@ class MySqlEmitterTest {
         String emitted = new MySqlEmitter().visitRawReadIntoStatement(node);
 
         assertEquals(
-                "SET @titan_r1 = NULL;\n"
-                        + "SET @titan_r2 = NULL;\n"
-                        + "SET @titan_p1 = p_account_id;\n"
-                        + "PREPARE titan_stmt_1 FROM 'SELECT balance, tier INTO @titan_r1, @titan_r2 FROM accounts WHERE id = ?';\n"
-                        + "EXECUTE titan_stmt_1 USING @titan_p1;\n"
-                        + "DEALLOCATE PREPARE titan_stmt_1;\n"
-                        + "SET v_balance = @titan_r1;\n"
-                        + "SET v_tier = @titan_r2;",
+                "BEGIN\n"
+                        + "    DECLARE CONTINUE HANDLER FOR NOT FOUND BEGIN END;\n"
+                        + "    SET v_balance = NULL;\n"
+                        + "    SET v_tier = NULL;\n"
+                        + "    SELECT balance, tier INTO v_balance, v_tier FROM accounts WHERE id = p_account_id;\n"
+                        + "END;",
                 emitted);
+    }
+
+    @Test
+    void emitsFixedShapeRawReadsWithoutSessionStagingVariables() {
+        MySqlEmitter emitter = new MySqlEmitter();
+        String numericRead = emitter.visitRawReadIntoStatement(new RawReadIntoStatement(
+                List.of("v_id"), new RawSql("SELECT id FROM customers WHERE id = ?", List.of("p_id"), "MYSQL")));
+        String textRead = emitter.visitRawReadIntoStatement(new RawReadIntoStatement(
+                List.of("v_name"), new RawSql("SELECT name FROM countries WHERE code = ?", List.of("p_code"), "MYSQL")));
+
+        assertTrue(numericRead.contains("SET v_id = NULL;"), numericRead);
+        assertTrue(numericRead.contains("SELECT id INTO v_id FROM customers WHERE id = p_id;"), numericRead);
+        assertTrue(textRead.contains("SET v_name = NULL;"), textRead);
+        assertTrue(textRead.contains("SELECT name INTO v_name FROM countries WHERE code = p_code;"), textRead);
+        assertFalse(numericRead.contains("@titan_"), numericRead);
+        assertFalse(textRead.contains("@titan_"), textRead);
     }
 
     @Test
@@ -715,9 +773,7 @@ class MySqlEmitterTest {
 
         String emitted = new MySqlEmitter().visitRawReadIntoStatement(node);
 
-        assertTrue(emitted.contains(
-                "PREPARE titan_stmt_1 FROM 'SELECT ''shipped FROM warehouse'' "
-                        + "INTO @titan_r1 FROM orders WHERE id = ?';"));
+        assertTrue(emitted.contains("SELECT 'shipped FROM warehouse' INTO v_label FROM orders WHERE id = p_id;"), emitted);
     }
 
     @Test
@@ -770,6 +826,47 @@ class MySqlEmitterTest {
     }
 
     @Test
+    void materializesProcedureRawCursorsForStructuralSplices() {
+        RawCursorStatement cursor = new RawCursorStatement(
+                List.of("v_amount"),
+                new RawSql("SELECT amount FROM " + RawSql.spliceMarker(1) + " WHERE customer_id = ?",
+                        List.of("p_customer_id"), "MYSQL", List.of(),
+                        List.of(new SpliceBind(1, "p_invoices", SpliceBind.Kind.IDENTIFIER))),
+                new Block(
+                        List.of(new DeclareVariable("v_amount", new TIntType(), false, null)),
+                        List.of(new Assign(
+                                new VariableRefExpression("v_total"),
+                                new BinaryOpExpression(
+                                        new VariableRefExpression("v_total"),
+                                        BinaryOperator.ADD,
+                                        new VariableRefExpression("v_amount")))),
+                        List.of()),
+                null);
+        Block body = new Block(
+                List.of(
+                        new DeclareVariable("p_customer_id", new TIntType(), false, null),
+                        new DeclareVariable("p_invoices", new TTextType(), false, null),
+                        new DeclareVariable("v_total", new TIntType(), false, new LiteralExpression(0, new TIntType()))),
+                List.of(cursor),
+                List.of());
+
+        String emitted = new MySqlEmitter().emitProcedure("app", "cursor_proc", SecurityMode.INVOKER, body);
+
+        assertTrue(emitted.contains("CREATE TEMPORARY TABLE titan_cursor_rows_v_amount "
+                + "(titan_cursor_ordinal_v_amount BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY)"), emitted);
+        assertTrue(emitted.contains("SET @titan_dsql_1 = CONCAT("), emitted);
+        assertTrue(emitted.contains("PREPARE titan_cursor_stmt_1 FROM @titan_dsql_1;"), emitted);
+        assertTrue(emitted.contains("SELECT COUNT(*) INTO cursor_row_count_v_amount "
+                + "FROM titan_cursor_rows_v_amount;"), emitted);
+        assertTrue(emitted.contains("SELECT * INTO cursor_row_id_v_amount, v_amount "
+                + "FROM titan_cursor_rows_v_amount WHERE titan_cursor_ordinal_v_amount "
+                + "= cursor_ordinal_v_amount;"), emitted);
+        assertFalse(emitted.contains("CURSOR FOR"), emitted);
+        assertFalse(emitted.contains("FETCH "), emitted);
+        assertTrue(emitted.contains("DROP TEMPORARY TABLE IF EXISTS titan_cursor_rows_v_amount;"), emitted);
+    }
+
+    @Test
     void emitsTransactionControlAsCommitAndRollback() {
         assertEquals("COMMIT;",
                 new MySqlEmitter().visitTransactionControlStatement(
@@ -816,35 +913,26 @@ class MySqlEmitterTest {
 
         String emitted = new MySqlEmitter().visitRawReadIntoStatement(node);
 
-        assertTrue(emitted.contains(
-                "PREPARE titan_stmt_1 FROM 'SELECT ''UNION local 42'' "
-                        + "INTO @titan_r1 FROM members WHERE id = ?';"));
+        assertTrue(emitted.contains("SELECT 'UNION local 42' INTO v_label FROM members WHERE id = p_id;"), emitted);
     }
 
     @Test
-    void emitsRawReadIntoWithoutUsingWhenNoBinds() {
-        // The MySQL no-bind single-row read branch: no 'SET @titan_pN' staging and a bare
-        // 'EXECUTE titan_stmt_1;' (no USING). Byte-asserted symmetrically with the PG no-bind read.
+    void emitsFixedShapeRawReadIntoWithoutSessionBinds() {
         RawReadIntoStatement node = new RawReadIntoStatement(
                 List.of("v_count"),
                 new RawSql("SELECT count(*) FROM accounts", List.of(), "MYSQL"));
 
         String emitted = new MySqlEmitter().visitRawReadIntoStatement(node);
 
-        assertEquals(
-                "SET @titan_r1 = NULL;\n"
-                        + "PREPARE titan_stmt_1 FROM 'SELECT count(*) INTO @titan_r1 FROM accounts';\n"
-                        + "EXECUTE titan_stmt_1;\n"
-                        + "DEALLOCATE PREPARE titan_stmt_1;\n"
-                        + "SET v_count = @titan_r1;",
-                emitted);
+        assertTrue(emitted.contains("SET v_count = NULL;"), emitted);
+        assertTrue(emitted.contains("SELECT count(*) INTO v_count FROM accounts;"), emitted);
     }
 
     @Test
     void emitsRawReadIntoGuardAsFoundHandlerNotFirstColumnNullProxy() {
         // JDBC I-4 §6.1 early-return guard on MySQL: SELECT ... INTO sets no usable ROW_COUNT()/FOUND,
         // so the no-row signal is a dedicated found flag flipped by a CONTINUE HANDLER FOR NOT FOUND
-        // (the cursor scaffold), wrapping the staged read in a BEGIN ... END. It is NOT a "first INTO
+        // (the cursor scaffold), wrapping the static read in a BEGIN ... END. It is NOT a "first INTO
         // target IS NULL" proxy: an existing row with a NULL first column does not falsely raise
         // (WS-C Phase 2b audit).
         RawReadIntoStatement node = new RawReadIntoStatement(
@@ -858,12 +946,8 @@ class MySqlEmitterTest {
                 "BEGIN\n"
                         + "    DECLARE titan_found BOOLEAN DEFAULT TRUE;\n"
                         + "    DECLARE CONTINUE HANDLER FOR NOT FOUND SET titan_found = FALSE;\n"
-                        + "    SET @titan_r1 = NULL;\n"
-                        + "    SET @titan_p1 = p_id;\n"
-                        + "    PREPARE titan_stmt_1 FROM 'SELECT optional_note INTO @titan_r1 FROM accounts WHERE id = ?';\n"
-                        + "    EXECUTE titan_stmt_1 USING @titan_p1;\n"
-                        + "    DEALLOCATE PREPARE titan_stmt_1;\n"
-                        + "    SET v_note = @titan_r1;\n"
+                        + "    SET v_note = NULL;\n"
+                        + "    SELECT optional_note INTO v_note FROM accounts WHERE id = p_id;\n"
                         + "    IF NOT titan_found THEN\n"
                         + "        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'account not found';\n"
                         + "    END IF;\n"
@@ -899,18 +983,15 @@ class MySqlEmitterTest {
 
     @Test
     void stripsSingleTrailingSemicolonFromRawReadSource() {
-        // Input hygiene: a single trailing ';' must not survive into the PREPARE literal as an internal
-        // terminator.
+        // Input hygiene: a single trailing ';' must not produce a double terminator in static SQL.
         RawReadIntoStatement node = new RawReadIntoStatement(
                 List.of("v_balance"),
                 new RawSql("SELECT balance FROM accounts WHERE id = ?;", List.of("p_id"), "MYSQL"));
 
         String emitted = new MySqlEmitter().visitRawReadIntoStatement(node);
 
-        assertTrue(emitted.contains(
-                "PREPARE titan_stmt_1 FROM 'SELECT balance INTO @titan_r1 FROM accounts WHERE id = ?';"),
-                emitted);
-        assertFalse(emitted.contains("?;'"), emitted);
+        assertTrue(emitted.contains("SELECT balance INTO v_balance FROM accounts WHERE id = p_id;"), emitted);
+        assertFalse(emitted.contains(";;"), emitted);
     }
 
     @Test
@@ -1124,6 +1205,18 @@ class MySqlEmitterTest {
                 "__titan_char_code",
                 List.of(new VariableRefExpression("v_ch")),
                 null));
+        String base64UrlEncodeSql = emitter.visitFunctionCallExpression(new FunctionCallExpression(
+                "__titan_text_base64url_encode_utf8",
+                List.of(new VariableRefExpression("v_text")),
+                null));
+        String base64UrlDecodeSql = emitter.visitFunctionCallExpression(new FunctionCallExpression(
+                "__titan_text_base64url_decode_utf8",
+                List.of(new VariableRefExpression("v_base64")),
+                null));
+        String base64UrlAlphabetIndexSql = emitter.visitFunctionCallExpression(new FunctionCallExpression(
+                "__titan_text_base64url_alphabet_index",
+                List.of(new VariableRefExpression("v_char")),
+                null));
         String indexOfFromSql = emitter.visitFunctionCallExpression(new FunctionCallExpression(
                 "__titan_str_index_of",
                 List.of(
@@ -1142,8 +1235,18 @@ class MySqlEmitterTest {
                 "equals",
                 List.of(new VariableRefExpression("v_left"), new VariableRefExpression("v_right")),
                 null));
+        String stringEqualsSql = emitter.visitFunctionCallExpression(new FunctionCallExpression(
+                "__titan_str_equals",
+                List.of(new VariableRefExpression("v_left"), new VariableRefExpression("v_right")),
+                null));
 
         assertEquals("ASCII(v_ch)", charCodeSql);
+        assertEquals("REPLACE(REPLACE(REPLACE(REPLACE(TO_BASE64(CONVERT(v_text USING utf8mb4)), '=', ''), '+', '-'), '/', '_'), CHAR(10), '')",
+                base64UrlEncodeSql);
+        assertEquals("CONVERT(FROM_BASE64(CONCAT(REPLACE(REPLACE(v_base64, '-', '+'), '_', '/'), REPEAT('=', MOD(4 - MOD(CHAR_LENGTH(v_base64), 4), 4)))) USING utf8mb4)",
+                base64UrlDecodeSql);
+        assertEquals("(LOCATE(BINARY v_char, BINARY 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_') - 1)",
+                base64UrlAlphabetIndexSql);
         assertEquals(
                 "(CASE WHEN 'x' = '' THEN LEAST(GREATEST(v_from, 0), CHAR_LENGTH(v_text))"
                         + " WHEN GREATEST(v_from, 0) > CHAR_LENGTH(v_text) THEN -1"
@@ -1156,6 +1259,7 @@ class MySqlEmitterTest {
                         + " ELSE SUBSTRING(v_text, v_offset + 1, CHAR_LENGTH('pre')) = 'pre' END)",
                 startsWithOffsetSql);
         assertEquals("(v_left <=> v_right)", nullSafeEqualsSql);
+        assertEquals("(BINARY v_left = BINARY v_right)", stringEqualsSql);
     }
 
     @Test
@@ -1191,6 +1295,10 @@ class MySqlEmitterTest {
                 List.of(new VariableRefExpression("v_ts")),
                 null));
         String instantNow = emitter.visitFunctionCallExpression(new FunctionCallExpression("__titan_time_instant_now", List.of(), null));
+        String instantOfEpochMillis = emitter.visitFunctionCallExpression(new FunctionCallExpression(
+                "__titan_time_instant_of_epoch_millis",
+                List.of(new VariableRefExpression("v_epoch_millis")),
+                null));
         String zonedNow = emitter.visitFunctionCallExpression(new FunctionCallExpression("__titan_time_zoneddatetime_now", List.of(), null));
         String toInstant = emitter.visitFunctionCallExpression(new FunctionCallExpression(
                 "__titan_time_to_instant",
@@ -1216,6 +1324,7 @@ class MySqlEmitterTest {
         assertTrue(plusDays.equals("DATE_ADD(v_date, INTERVAL 2 DAY)"));
         assertTrue(toDate.equals("DATE(v_ts)"));
         assertTrue(instantNow.equals("UTC_TIMESTAMP()"));
+        assertTrue(instantOfEpochMillis.equals("TIMESTAMPADD(MICROSECOND, (v_epoch_millis * 1000), '1970-01-01 00:00:00')"));
         assertTrue(zonedNow.equals("CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', @@session.time_zone)"));
         assertTrue(toInstant.equals("CONVERT_TZ(v_ts, @@session.time_zone, '+00:00')"));
         assertTrue(duration.equals("INTERVAL 90 SECOND"));
@@ -2172,12 +2281,14 @@ class MySqlEmitterTest {
 
         int bodyVariable = sql.indexOf("DECLARE v_total INT");
         int telemetryVariable = sql.indexOf("DECLARE __titan_telemetry_id BIGINT DEFAULT NULL;");
+        int savedLastInsertId = sql.indexOf("DECLARE __titan_saved_last_insert_id BIGINT DEFAULT LAST_INSERT_ID();");
         int savedTimeZone = sql.indexOf("DECLARE __titan_saved_time_zone VARCHAR(64) DEFAULT @@session.time_zone;");
         int cursor = sql.indexOf("CURSOR FOR");
         int handler = sql.indexOf("DECLARE EXIT HANDLER FOR SQLEXCEPTION");
         assertTrue(bodyVariable >= 0, sql);
         assertTrue(telemetryVariable > bodyVariable, sql);
-        assertTrue(savedTimeZone > telemetryVariable, sql);
+        assertTrue(savedLastInsertId > telemetryVariable, sql);
+        assertTrue(savedTimeZone > savedLastInsertId, sql);
         assertTrue(cursor > savedTimeZone, sql);
         assertTrue(handler > cursor, sql);
     }
@@ -2185,17 +2296,21 @@ class MySqlEmitterTest {
     @Test
     void savesAndRestoresSessionTimeZoneAcrossAllMySqlExitPaths() {
         // E-8 (plan 3.1): the caller's @@session.time_zone is saved into a DECLAREd local
-        // (reentrancy-safe under nested generated routines, unlike a session @variable) and
-        // restored on the fall-through tail, before every RETURN, and inside the always-emitted
-        // routine-level EXIT handler before RESIGNAL.
+        // (reentrancy-safe under nested generated routines, unlike a session @variable). A
+        // routine pins only when its caller is not already UTC, so nested generated functions
+        // do not repeatedly mutate shared session state; the saved zone is restored on every
+        // exit path only when this routine performed that pin.
         Block procedureBody = new Block(List.of(), List.of(), List.of());
         String procedureSql = new MySqlEmitter().emitProcedure("app", "tz_proc", SecurityMode.INVOKER, procedureBody);
 
         assertTrue(procedureSql.contains("DECLARE __titan_saved_time_zone VARCHAR(64) DEFAULT @@session.time_zone;"));
-        int pin = procedureSql.indexOf("SET time_zone = '+00:00';");
-        int handlerRestore = procedureSql.indexOf("SET time_zone = __titan_saved_time_zone;");
+        assertTrue(procedureSql.contains("DECLARE __titan_time_zone_pinned BOOLEAN DEFAULT FALSE;"), procedureSql);
+        int pinGate = procedureSql.indexOf("IF @@session.time_zone <> '+00:00' THEN");
+        int pin = procedureSql.indexOf("SET time_zone = '+00:00';", pinGate);
+        int handlerRestore = procedureSql.indexOf("IF __titan_time_zone_pinned THEN SET time_zone = __titan_saved_time_zone; END IF;");
         int resignal = procedureSql.indexOf("RESIGNAL;");
-        int tailRestore = procedureSql.lastIndexOf("SET time_zone = __titan_saved_time_zone;");
+        int tailRestore = procedureSql.lastIndexOf("IF __titan_time_zone_pinned THEN SET time_zone = __titan_saved_time_zone; END IF;");
+        assertTrue(pinGate >= 0, procedureSql);
         assertTrue(pin >= 0, procedureSql);
         // Exception path: the EXIT handler restores before re-raising.
         assertTrue(handlerRestore >= 0 && handlerRestore < resignal, procedureSql);
@@ -2212,7 +2327,7 @@ class MySqlEmitterTest {
         // RETURN path: the value is staged under UTC, the zone restored, the staged value returned.
         assertTrue(functionSql.contains("DECLARE __titan_return_value INT;"), functionSql);
         int staged = functionSql.indexOf("SET __titan_return_value = 5;");
-        int returnRestore = functionSql.indexOf("SET time_zone = __titan_saved_time_zone;", staged);
+        int returnRestore = functionSql.indexOf("IF __titan_time_zone_pinned THEN SET time_zone = __titan_saved_time_zone; END IF;", staged);
         int returnStatement = functionSql.indexOf("RETURN __titan_return_value;");
         assertTrue(staged >= 0, functionSql);
         assertTrue(returnRestore > staged, functionSql);

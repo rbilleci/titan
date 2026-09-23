@@ -9,6 +9,7 @@ final class PostgreSqlTypeMapper implements TypeMapper {
             case TBooleanType ignored -> "BOOLEAN";
             case TTextType ignored -> "TEXT";
             case TNumericType t -> "NUMERIC(" + t.precision() + "," + t.scale() + ")";
+            case TDoubleType ignored -> "DOUBLE PRECISION";
             case TDateType ignored -> "DATE";
             case TTimeType ignored -> "TIME";
             case TTimestampType ignored -> "TIMESTAMP";

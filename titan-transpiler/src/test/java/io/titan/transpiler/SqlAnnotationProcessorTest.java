@@ -51,6 +51,34 @@ class SqlAnnotationProcessorTest {
     }
 
     @Test
+    void localSqlAnnotationCanBindAnEarlierLocalVariable() throws Exception {
+        Path sourceFile = tempDir.resolve("LocalSqlAnnotatedEntryPoint.java");
+        Files.writeString(sourceFile, """
+                import titan.dsl.SQL;
+                import titan.dsl.SqlDialect;
+                import titan.dsl.StoredProcedure;
+
+                class LocalSqlAnnotatedEntryPoint {
+                    @StoredProcedure
+                    public static void run(String query) {
+                        String response = query;
+                        @SQL(dialect = SqlDialect.MYSQL, value = "SELECT :response AS response_json")
+                        String emittedResponse = response;
+                    }
+                }
+                """);
+
+        ParsedSources parsed = new JavaSourceParser().parse(List.of(sourceFile), List.of(), "21", false);
+        List<DiscoveredEntryPoint> entryPoints = new EntryPointDiscovery().discover(parsed);
+        Map<String, List<SqlAnnotationProcessor.ProcessedSqlAnnotation>> processed =
+                new SqlAnnotationProcessor().process(parsed, entryPoints);
+
+        var sql = processed.get(entryPoints.getFirst().methodSignatureKey()).getFirst();
+        assertEquals("MYSQL", sql.dialect());
+        assertEquals(List.of("response"), sql.parameterNames());
+    }
+
+    @Test
     void skipsDslPromotionWarningForVendorSpecificSql() throws Exception {
         Path sourceFile = tempDir.resolve("VendorSqlAnnotatedEntryPoint.java");
         Files.writeString(sourceFile, """

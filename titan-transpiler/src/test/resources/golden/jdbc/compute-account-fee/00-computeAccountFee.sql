@@ -16,7 +16,7 @@ BEGIN
             RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'account not found';
         END IF;
     END;
-    v_fee := CASE WHEN COALESCE(CASE WHEN v_tier IS NULL THEN FALSE ELSE ('GOLD' = v_tier) END, FALSE) THEN (v_balance * p_gold_rate) ELSE (v_balance * p_std_rate) END;
+    v_fee := CASE WHEN COALESCE(CASE WHEN v_tier IS NULL THEN FALSE ELSE (CONVERT_TO('GOLD', 'UTF8') = CONVERT_TO(v_tier, 'UTF8')) END, FALSE) THEN (v_balance * p_gold_rate) ELSE (v_balance * p_std_rate) END;
     EXECUTE 'UPDATE accounts SET fee = $1 WHERE id = $2' USING v_fee, p_account_id;
 END;
 $$;

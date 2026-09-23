@@ -502,9 +502,14 @@ public final class TranspilationPipeline {
 
                     String routineName = routineNameBySignature.getOrDefault(key, toSqlRoutineName(entryPoint, capabilities.namingRules(), overloadCountsByMethod));
                     SecurityMode securityMode = entryPoint.securityDefiner() ? SecurityMode.DEFINER : SecurityMode.INVOKER;
+                    // Observability belongs at the public stored-routine boundary.  Source-local
+                    // helpers are implementation details and can be invoked thousands of times
+                    // by one request; emitting telemetry writes for each one turns a single
+                    // database operation into an unbounded write amplification loop.
+                    boolean routineObservability = observability && !entryPoint.internalHelper();
                     String sql = switch (emittedKind) {
-                        case STORED_PROCEDURE -> emitter.emitProcedure(dialect, schema, routineName, securityMode, debugFilteredBody, routineParameters, observability, accessedSensitiveColumns);
-                        case STORED_FUNCTION -> emitter.emitFunction(dialect, schema, routineName, securityMode, functionReturnType, debugFilteredBody, routineParameters, observability, accessedSensitiveColumns);
+                        case STORED_PROCEDURE -> emitter.emitProcedure(dialect, schema, routineName, securityMode, debugFilteredBody, routineParameters, routineObservability, accessedSensitiveColumns);
+                        case STORED_FUNCTION -> emitter.emitFunction(dialect, schema, routineName, securityMode, functionReturnType, debugFilteredBody, routineParameters, routineObservability, accessedSensitiveColumns);
                         case TRIGGER -> emitTrigger(entryPoint, emitter, dialect, schema, routineName, securityMode, debugFilteredBody, accessedSensitiveColumns);
                         case SCHEDULED_JOB -> emitScheduledJob(entryPoint, emitter, dialect, schema, routineName, securityMode, debugFilteredBody, observability, accessedSensitiveColumns, sink);
                     };
@@ -1284,12 +1289,18 @@ public final class TranspilationPipeline {
             case SubqueryExpression subquery -> new SubqueryExpression((SelectSql) remapSql(subquery.select(), routineNameBySignature, schema));
             case IsNullExpression isNull -> new IsNullExpression(remapExpression(isNull.expression(), routineNameBySignature, schema));
             case IsNotNullExpression isNotNull -> new IsNotNullExpression(remapExpression(isNotNull.expression(), routineNameBySignature, schema));
+            case NotExpression not -> new NotExpression(remapExpression(not.expression(), routineNameBySignature, schema));
             case CastExpression cast -> new CastExpression(remapExpression(cast.expression(), routineNameBySignature, schema), qualifyRecordType(cast.targetType(), schema), cast.truncating());
             case CoalesceExpression coalesce -> new CoalesceExpression(coalesce.expressions().stream()
                     .map(expr -> remapExpression(expr, routineNameBySignature, schema)).toList());
             case ExistsExpression exists -> new ExistsExpression(
                     (SelectSql) remapSql(exists.subquery(), routineNameBySignature, schema),
                     exists.negated());
+            case InListExpression inList -> new InListExpression(
+                    remapExpression(inList.value(), routineNameBySignature, schema),
+                    inList.items().stream().map(item -> remapExpression(item, routineNameBySignature, schema)).toList(),
+                    inList.subquery() == null ? null : (SelectSql) remapSql(inList.subquery(), routineNameBySignature, schema),
+                    inList.negated());
             case WindowFunctionExpression window -> new WindowFunctionExpression(
                     window.function(),
                     window.arguments().stream().map(arg -> remapExpression(arg, routineNameBySignature, schema)).toList(),

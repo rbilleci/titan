@@ -21,8 +21,7 @@ import org.junit.jupiter.api.io.TempDir;
  * WS-C Phase 3 Rung 5 — the unknown-shape result carrier (design contract D5). Source → parse → lower
  * → assert the carrier TIR shape ({@link DynamicResultStatement}); → emit and assert the native
  * per-dialect carrier (PostgreSQL {@code jsonb_agg}/{@code to_jsonb} function {@code RETURNS jsonb};
- * MySQL a {@code @StoredProcedure} streaming a native open result set via {@code PREPARE}/{@code
- * EXECUTE}).
+ * MySQL a {@code @StoredProcedure} streaming a native open result set).
  *
  * <p><b>The invariants under test:</b> only a PURE metadata-driven generic reader carrier-lowers; ANY
  * business logic over the unknown-shape rows is Tier-4 and REJECTS ("generic ResultSet processing beyond
@@ -404,8 +403,10 @@ class JdbcDynamicResultLoweringTest {
                 "MySQL carrier is a PROCEDURE (dynamic SQL is forbidden in a FUNCTION); was:\n" + sql);
         assertFalse(sql.contains("CREATE FUNCTION"), "MySQL carrier must not be a function; was:\n" + sql);
         assertFalse(sql.contains("RETURNS"), "a MySQL procedure has no RETURNS; was:\n" + sql);
-        assertTrue(sql.contains("PREPARE") && sql.contains("EXECUTE"),
-                "MySQL carrier PREPARE/EXECUTEs the dynamic SELECT (open result set); was:\n" + sql);
+        assertTrue(sql.contains("SELECT id, label FROM widgets ORDER BY id;"),
+                "MySQL carrier must emit the fixed-shape SELECT as native SQL; was:\n" + sql);
+        assertFalse(sql.contains("PREPARE") || sql.contains("EXECUTE"),
+                "a fixed-shape open result must not use dynamic SQL; was:\n" + sql);
         // No INTO (the result set streams to the client) and no JSON aggregation (that is the PG form).
         assertFalse(sql.contains("INTO @titan_r"),
                 "the MySQL carrier must leave the result set OPEN (no INTO); was:\n" + sql);

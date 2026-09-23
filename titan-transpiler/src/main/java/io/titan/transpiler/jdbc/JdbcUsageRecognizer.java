@@ -581,7 +581,6 @@ public final class JdbcUsageRecognizer {
             if (!shapes.isResultSetNextCall(condition, path)) {
                 return;
             }
-            Element driving = shapes.resultSetNextReceiver(condition, path);
             // §3.3 negative list: a while (rs.next()) { ...; break; } whose body unconditionally breaks
             // out after the first iteration is a single-row read disguised as a loop — an enumerated
             // reject (distinct from a legitimate *conditional* break inside a true multi-row loop).
@@ -592,14 +591,9 @@ public final class JdbcUsageRecognizer {
                                 + "(docs/transpilable-jdbc-subset.md §3.3)");
                 return;
             }
-            // Guardrail: the loop body must not open a second driving ResultSet, and the ResultSet
-            // must not escape (escape is caught by recognizeReturn/recognizeAssignment globally).
-            if (bodyOpensNestedCursor(node.getStatement(), driving, path)) {
-                reject(JdbcIdiom.I_5, node, path,
-                        "a second ResultSet opened inside while (rs.next()) is rejected in v1 (nested cursors "
-                                + "are §7 open-question territory; docs/transpilable-jdbc-subset.md §3.3)");
-                return;
-            }
+            // A nested while (innerRs.next()) is lowered as its own cursor block. Its JDBC handles
+            // are lexical locals, while the outer ResultSet remains non-escaping; recursive
+            // recognition/lowering validates each cursor independently.
             accept(JdbcIdiom.I_5, node, path);
         }
 
@@ -812,13 +806,6 @@ public final class JdbcUsageRecognizer {
 
         private boolean isBareExpressionStatement(TreePath path) {
             return shapes.isBareExpressionStatement(path);
-        }
-
-        private boolean bodyOpensNestedCursor(Tree body, Element driving, TreePath path) {
-            // True if the loop body opens a *different* ResultSet via executeQuery on another handle.
-            // Hoisted into JdbcShapes so the Phase-2 lowerer shares this exact guard (single source of
-            // truth) and rejects the nested-cursor shape with the same actionable message.
-            return shapes.bodyOpensNestedCursor(body, driving, path);
         }
 
         private boolean hasEnclosingHandleDeclaration(TreePath invocationPath) {

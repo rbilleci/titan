@@ -397,6 +397,8 @@ public final class EmulationInsertionPass {
                 case INT_ADD_MARKER, INT_SUB_MARKER, INT_MUL_MARKER -> new TIntType();
                 // The lowerer's char-code marker yields a Java int (char promoted for arithmetic).
                 case "__titan_char_code" -> new TIntType();
+                case "__titan_text_base64url_encode_utf8", "__titan_text_base64url_decode_utf8" -> new TTextType();
+                case "__titan_text_base64url_alphabet_index" -> new TIntType();
                 default -> null;
             };
             case CaseWhenExpression caseWhen -> {
@@ -452,6 +454,9 @@ public final class EmulationInsertionPass {
     private TirType joinNumeric(TirType left, TirType right) {
         if (left == null || right == null) {
             return null;
+        }
+        if (left instanceof TDoubleType || right instanceof TDoubleType) {
+            return new TDoubleType();
         }
         if (left instanceof TNumericType || right instanceof TNumericType) {
             return left instanceof TNumericType ? left : right;

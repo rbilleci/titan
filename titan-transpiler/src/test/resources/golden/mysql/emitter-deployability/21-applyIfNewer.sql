@@ -5,12 +5,16 @@ SQL SECURITY INVOKER
 BEGIN
     DECLARE v_current INT;
     DECLARE __titan_saved_time_zone VARCHAR(64) DEFAULT @@session.time_zone;
+    DECLARE __titan_time_zone_pinned BOOLEAN DEFAULT FALSE;
     DECLARE EXIT HANDLER FOR SQLEXCEPTION
     BEGIN
-        SET time_zone = __titan_saved_time_zone;
+        IF __titan_time_zone_pinned THEN SET time_zone = __titan_saved_time_zone; END IF;
         RESIGNAL;
     END;
-    SET time_zone = '+00:00';
+    IF @@session.time_zone <> '+00:00' THEN
+        SET time_zone = '+00:00';
+        SET __titan_time_zone_pinned = TRUE;
+    END IF;
     proc_body: BEGIN
         SELECT `gate_events`.`version` INTO v_current FROM `test`.`gate_events` WHERE COALESCE((`gate_events`.`id` = p_id), FALSE) LIMIT 1;
         IF COALESCE((v_current >= p_new_version), FALSE) THEN
@@ -18,6 +22,6 @@ BEGIN
         END IF;
         INSERT INTO `test`.`gate_events` (`id`, `name`, `version`) VALUES (p_id, p_name, p_new_version) ON DUPLICATE KEY UPDATE `name` = p_name, `version` = p_new_version;
     END;
-    SET time_zone = __titan_saved_time_zone;
+    IF __titan_time_zone_pinned THEN SET time_zone = __titan_saved_time_zone; END IF;
 END$$
 DELIMITER ;

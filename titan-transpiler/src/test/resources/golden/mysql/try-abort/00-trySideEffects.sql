@@ -6,13 +6,17 @@ SQL SECURITY INVOKER
 BEGIN
     DECLARE v_result TEXT;
     DECLARE __titan_saved_time_zone VARCHAR(64) DEFAULT @@session.time_zone;
+    DECLARE __titan_time_zone_pinned BOOLEAN DEFAULT FALSE;
     DECLARE __titan_return_value TEXT;
     DECLARE EXIT HANDLER FOR SQLEXCEPTION
     BEGIN
-        SET time_zone = __titan_saved_time_zone;
+        IF __titan_time_zone_pinned THEN SET time_zone = __titan_saved_time_zone; END IF;
         RESIGNAL;
     END;
-    SET time_zone = '+00:00';
+    IF @@session.time_zone <> '+00:00' THEN
+        SET time_zone = '+00:00';
+        SET __titan_time_zone_pinned = TRUE;
+    END IF;
     SET v_result = 'start';
     BEGIN
         DECLARE __titan_saved_exception BOOLEAN DEFAULT FALSE;
@@ -94,8 +98,8 @@ BEGIN
         END IF;
     END;
     SET __titan_return_value = v_result;
-    SET time_zone = __titan_saved_time_zone;
+    IF __titan_time_zone_pinned THEN SET time_zone = __titan_saved_time_zone; END IF;
     RETURN __titan_return_value;
-    SET time_zone = __titan_saved_time_zone;
+    IF __titan_time_zone_pinned THEN SET time_zone = __titan_saved_time_zone; END IF;
 END$$
 DELIMITER ;

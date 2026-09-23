@@ -14,7 +14,6 @@ import com.sun.source.tree.StatementTree;
 import com.sun.source.tree.ThrowTree;
 import com.sun.source.tree.Tree;
 import com.sun.source.tree.UnaryTree;
-import com.sun.source.tree.VariableTree;
 import com.sun.source.util.TreePath;
 import io.titan.transpiler.ParsedSources;
 import java.util.List;
@@ -170,34 +169,6 @@ public final class JdbcShapes {
             terminal = statements.get(statements.size() - 1);
         }
         return terminal instanceof BreakTree breakTree && breakTree.getLabel() == null;
-    }
-
-    /**
-     * True if the {@code while (rs.next())} loop {@code body} opens a <i>different</i>
-     * {@code ResultSet} (a nested cursor) than the {@code driving} one — §3.3 rejects a second
-     * ResultSet opened inside the loop in v1. The single source of truth for this guard, shared by
-     * {@link JdbcUsageRecognizer} (its cursor-loop rejection) and the Phase-2
-     * {@code JdbcStatementLowerer.lowerCursorLoop} (so the lowerer rejects with the same actionable
-     * message instead of crashing on the inner {@code PreparedStatement} local's type mapping).
-     */
-    public boolean bodyOpensNestedCursor(Tree body, Element driving, TreePath path) {
-        boolean[] found = {false};
-        TreePath bodyPath = new TreePath(path, body);
-        new com.sun.source.util.TreePathScanner<Void, Void>() {
-            @Override
-            public Void visitVariable(VariableTree node, Void unused) {
-                TreePath vp = getCurrentPath();
-                TypeMirror t = parsed.trees().getTypeMirror(vp);
-                if (t != null && oracle.isResultSet(t)) {
-                    Element local = parsed.trees().getElement(vp);
-                    if (local != null && !local.equals(driving)) {
-                        found[0] = true;
-                    }
-                }
-                return super.visitVariable(node, unused);
-            }
-        }.scan(bodyPath, null);
-        return found[0];
     }
 
     // ---- shared small predicates ----

@@ -200,7 +200,7 @@ class JdbcUsageRecognizerTest {
     }
 
     @Test
-    void i5NestedCursorInsideLoopIsRejected() throws Exception {
+    void i5LexicalNestedCursorInsideLoopIsTranspilable() throws Exception {
         MethodJdbcReport report = recognizeOne("Nested", prelude() + """
                 class Nested {
                     @StoredProcedure
@@ -215,8 +215,9 @@ class JdbcUsageRecognizerTest {
                     }
                 }
                 """);
-        assertEquals(JdbcClassification.REJECTED, report.rollup());
-        assertTrue(hasUsage(report, JdbcIdiom.I_5, JdbcClassification.REJECTED));
+        assertEquals(JdbcClassification.TRANSPILABLE, report.rollup());
+        assertTrue(hasUsage(report, JdbcIdiom.I_5, JdbcClassification.TRANSPILABLE));
+        assertFalse(hasUsage(report, JdbcIdiom.I_5, JdbcClassification.REJECTED));
     }
 
     // --- I-6 / I-8 update + plain statement --------------------------------------------------

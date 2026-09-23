@@ -1,5 +1,8 @@
 package io.titan.gradle;
 
+import com.github.dockerjava.api.model.ExposedPort;
+import com.github.dockerjava.api.model.PortBinding;
+import com.github.dockerjava.api.model.Ports;
 import io.titan.transpiler.tir.DialectId;
 import org.testcontainers.DockerClientFactory;
 import org.testcontainers.containers.GenericContainer;
@@ -27,6 +30,8 @@ final class TitanScratchDatabases {
     private static final String SCRATCH_USER = "titan";
     private static final String SCRATCH_PASSWORD = "titan";
     private static final String SCRATCH_DATABASE = "titan";
+    private static final String POSTGRES_HOST_PORT_ENV = "TITAN_SCRATCH_POSTGRES_HOST_PORT";
+    private static final String MYSQL_HOST_PORT_ENV = "TITAN_SCRATCH_MYSQL_HOST_PORT";
     private static final Duration STARTUP_TIMEOUT = Duration.ofMinutes(3);
     private static final Duration CONNECT_RETRY_INTERVAL = Duration.ofMillis(500);
 
@@ -125,7 +130,7 @@ final class TitanScratchDatabases {
     }
 
     private static GenericContainer<?> createContainer(DialectId dialectId) {
-        return switch (dialectId) {
+        GenericContainer<?> container = switch (dialectId) {
             case POSTGRESQL -> new GenericContainer<>(POSTGRES_IMAGE)
                     .withEnv("POSTGRES_USER", SCRATCH_USER)
                     .withEnv("POSTGRES_PASSWORD", SCRATCH_PASSWORD)
@@ -134,13 +139,50 @@ final class TitanScratchDatabases {
                     .withStartupTimeout(STARTUP_TIMEOUT);
             case MYSQL -> new GenericContainer<>(MYSQL_IMAGE)
                     // Root so additional databases (= MySQL schemas) can be created; routine
-                    // creation without SUPER needs log_bin_trust_function_creators.
+                    // creation without SUPER needs log_bin_trust_function_creators. Generated
+                    // package closures can exceed MySQL's historical 1 MiB packet default and the
+                    // former 16 MiB test ceiling, so scratch verification must exercise routine
+                    // installation rather than fail in the JDBC transport before MySQL parses the
+                    // artifact. Real targets retain the package-sized preflight.
                     .withEnv("MYSQL_ROOT_PASSWORD", SCRATCH_PASSWORD)
                     .withEnv("MYSQL_DATABASE", SCRATCH_DATABASE)
-                    .withCommand("--log_bin_trust_function_creators=1")
+                    .withCommand("--log_bin_trust_function_creators=1", "--max_allowed_packet=64M")
                     .withExposedPorts(3306)
                     .withStartupTimeout(STARTUP_TIMEOUT);
         };
+        String environmentVariable = dialectId == DialectId.POSTGRESQL
+                ? POSTGRES_HOST_PORT_ENV
+                : MYSQL_HOST_PORT_ENV;
+        int containerPort = dialectId == DialectId.POSTGRESQL ? 5432 : 3306;
+        applyOptionalHostPort(container, environmentVariable, containerPort);
+        return container;
+    }
+
+    /**
+     * Opt-in escape hatch for hosts where sustained ephemeral-port traffic races Docker's
+     * random published-port allocation. The default remains Docker-assigned.
+     */
+    private static void applyOptionalHostPort(
+            GenericContainer<?> container,
+            String environmentVariable,
+            int containerPort
+    ) {
+        String configured = System.getenv(environmentVariable);
+        if (configured == null || configured.isBlank()) {
+            return;
+        }
+        int hostPort;
+        try {
+            hostPort = Integer.parseInt(configured);
+        } catch (NumberFormatException ex) {
+            throw new IllegalArgumentException(environmentVariable + " must be an integer TCP port", ex);
+        }
+        if (hostPort < 1 || hostPort > 65_535) {
+            throw new IllegalArgumentException(environmentVariable + " must be between 1 and 65535");
+        }
+        container.withCreateContainerCmdModifier(command -> command.getHostConfig().withPortBindings(
+                new PortBinding(Ports.Binding.bindIpAndPort("127.0.0.1", hostPort),
+                        ExposedPort.tcp(containerPort))));
     }
 
     private static String jdbcUrl(DialectId dialectId, GenericContainer<?> container) {

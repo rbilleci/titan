@@ -9,6 +9,7 @@ import com.sun.source.tree.IfTree;
 import com.sun.source.tree.LiteralTree;
 import com.sun.source.tree.MemberSelectTree;
 import com.sun.source.tree.MethodInvocationTree;
+import com.sun.source.tree.MethodTree;
 import com.sun.source.tree.ReturnTree;
 import com.sun.source.tree.StatementTree;
 import com.sun.source.tree.Tree;
@@ -16,6 +17,7 @@ import com.sun.source.tree.TryTree;
 import com.sun.source.tree.VariableTree;
 import com.sun.source.tree.WhileLoopTree;
 import com.sun.source.util.TreePath;
+import com.sun.source.util.TreePathScanner;
 import io.titan.introspect.SchemaModel;
 import io.titan.transpiler.ParsedSources;
 import io.titan.transpiler.diagnostics.TitanErrorCode;
@@ -29,6 +31,7 @@ import java.util.List;
 import java.util.Map;
 import javax.lang.model.element.Element;
 import javax.lang.model.element.ElementKind;
+import javax.lang.model.element.ExecutableElement;
 import javax.lang.model.element.Modifier;
 import javax.lang.model.element.VariableElement;
 import javax.lang.model.type.TypeMirror;
@@ -161,6 +164,12 @@ final class JdbcStatementLowerer {
     private boolean rejectedMysqlFunctionDynamicSql;
     /** Counter for synthesised expression-bind locals (__titan_pN). */
     private int bindLocalCounter;
+    /** Counter for collision-free locals introduced by compile-time JDBC binder inlining. */
+    private int inlineHelperCounter;
+    /** Positive only while a compile-time JDBC binder helper body is being lowered. */
+    private int inlineHelperDepth;
+    /** Active helper-local element names while one binder helper body is lowered at its call site. */
+    private Map<Element, String> inlineVariableNames = Map.of();
     /** Counter for synthesised generated-key locals (__titan_genkeyN). */
     private int generatedKeyLocalCounter;
     /**
@@ -705,6 +714,9 @@ final class JdbcStatementLowerer {
         //     setAutoCommit, bare rs.next() / getGeneratedKeys trailer (elided).
         if (statement instanceof ExpressionStatementTree expressionStatement
                 && expressionStatement.getExpression() instanceof MethodInvocationTree invocation) {
+            if (lowerInlineJdbcBinderHelper(invocation, declarations, statements)) {
+                return index + 1;
+            }
             JdbcDisposition disposition = lowerJdbcInvocation(invocation, path, declarations, statements);
             if (disposition == JdbcDisposition.HANDLED) {
                 return index + 1;
@@ -755,6 +767,18 @@ final class JdbcStatementLowerer {
             return index + 1;
         }
 
+        // A request interpreter can execute a schema-selected write repeatedly (for example,
+        // serial mutation root fields).  Its loop is ordinary control flow, but its body may own a
+        // PreparedStatement.  Recurse through this lowerer just as for an ordinary conditional so
+        // the handle declaration and executeUpdate are recognized before stock lowering sees them.
+        if (statement instanceof WhileLoopTree whileTree) {
+            statements.add(new WhileStatement(
+                    ExpressionLowerer.lowerExpression(whileTree.getCondition(), parsed),
+                    lowerJdbcAsBlock(new TreePath(path, whileTree.getStatement())),
+                    null));
+            return index + 1;
+        }
+
         // (5) try-with-resources holding JDBC handles: recurse the try body through the JDBC lowerer so
         //     inner reads/binds are recognised; the resource close() is elided (no cursor token).
         if (statement instanceof TryTree tryTree && tryHoldsJdbcResource(tryTree, path)) {
@@ -762,9 +786,39 @@ final class JdbcStatementLowerer {
             return index + 1;
         }
 
+        // A query engine necessarily chooses SQL work after it has parsed the incoming request.
+        // Do not hand an ordinary conditional back to StatementLowerer when one of its branches
+        // contains JDBC handles: that lowerer maps PreparedStatement/ResultSet as ordinary Java
+        // locals and fails before their recognised JDBC shapes can run. Recurse through this
+        // lowerer instead, preserving the same statement/bind state within each branch.
+        if (statement instanceof IfTree ifTree) {
+            statements.add(lowerJdbcIf(ifTree, path));
+            return index + 1;
+        }
+
         // (6) Everything else: the existing control-flow / DSL / plain-Java lowering, verbatim.
         statements.add(StatementLowerer.lowerStatement(statement, path, parsed));
         return index + 1;
+    }
+
+    private IfStatement lowerJdbcIf(IfTree ifTree, TreePath ifPath) {
+        ExpressionNode condition = ExpressionLowerer.lowerExpression(ifTree.getCondition(), parsed);
+        Block thenBlock = lowerJdbcAsBlock(new TreePath(ifPath, ifTree.getThenStatement()));
+        StatementTree elseStatement = ifTree.getElseStatement();
+        Block elseBlock = elseStatement == null ? null
+                : lowerJdbcAsBlock(new TreePath(ifPath, elseStatement));
+        return new IfStatement(condition, thenBlock, List.of(), elseBlock);
+    }
+
+    private Block lowerJdbcAsBlock(TreePath statementPath) {
+        if (statementPath.getLeaf() instanceof BlockTree) {
+            return lowerBlock(statementPath);
+        }
+        StatementTree statement = (StatementTree) statementPath.getLeaf();
+        if (statement instanceof IfTree ifTree) {
+            return new Block(List.of(), List.of(lowerJdbcIf(ifTree, statementPath)), List.of());
+        }
+        return new Block(List.of(), List.of(StatementLowerer.lowerStatement(statement, statementPath, parsed)), List.of());
     }
 
     // ---- (1) handle declarations ----
@@ -863,7 +917,8 @@ final class JdbcStatementLowerer {
         // before reaching here, so this is for ordinary locals (accumulators, computed values, ...).
         TypeMirror resolvedType = parsed.trees().getTypeMirror(path);
         TirType type = LowererSupport.mapType(resolvedType, "variable '" + variable.getName() + "'");
-        String name = variable.getName().toString();
+        Element variableElement = parsed.trees().getElement(path);
+        String name = inlineVariableNames.getOrDefault(variableElement, variable.getName().toString());
         ExpressionNode initializer = variable.getInitializer() == null
                 ? null
                 : ExpressionLowerer.lowerExpression(variable.getInitializer(), parsed);
@@ -876,6 +931,107 @@ final class JdbcStatementLowerer {
     // ---- (2) JDBC invocation statements ----
 
     private enum JdbcDisposition { HANDLED, NOT_JDBC }
+
+    /**
+     * Inlines a source-local static void binder whose formal handle is a PreparedStatement. The helper
+     * is a compile-time fragment, not an SQL routine: its setter calls update the caller's existing
+     * statement state and its scalar locals are renamed per invocation.
+     */
+    private boolean lowerInlineJdbcBinderHelper(
+            MethodInvocationTree invocation,
+            List<DeclarationNode> declarations,
+            List<StatementNode> statements
+    ) {
+        TreePath invocationPath = LowererSupport.resolveTreePath(parsed, invocation);
+        Element resolved = invocationPath == null ? null : parsed.trees().getElement(invocationPath);
+        if (!(resolved instanceof ExecutableElement method)
+                || method.getReturnType().getKind() != javax.lang.model.type.TypeKind.VOID
+                || !method.getModifiers().contains(Modifier.STATIC)) {
+            return false;
+        }
+        int statementParameter = -1;
+        for (int index = 0; index < method.getParameters().size(); index++) {
+            String parameterType = method.getParameters().get(index).asType().toString();
+            if (parameterType.equals("java.sql.PreparedStatement")
+                    || parameterType.equals("java.sql.CallableStatement")) {
+                if (statementParameter >= 0) {
+                    throw new IllegalArgumentException("inline JDBC binder helper has more than one statement handle: "
+                            + method);
+                }
+                statementParameter = index;
+            }
+        }
+        if (statementParameter < 0) {
+            return false;
+        }
+        if (method.getParameters().size() != invocation.getArguments().size()) {
+            throw new IllegalArgumentException("inline JDBC binder helper argument count does not match its declaration: "
+                    + method);
+        }
+        Tree methodTreeValue = parsed.trees().getTree(method);
+        TreePath methodPath = parsed.trees().getPath(method);
+        if (!(methodTreeValue instanceof MethodTree methodTree) || methodTree.getBody() == null || methodPath == null) {
+            throw new IllegalArgumentException("inline JDBC binder helper must be source-local and have a body: " + method);
+        }
+
+        Map<Element, ExpressionNode> substitutions = new HashMap<>();
+        Map<Element, StatementState> handleAliases = new HashMap<>();
+        for (int index = 0; index < method.getParameters().size(); index++) {
+            VariableElement parameter = method.getParameters().get(index);
+            ExpressionTree argument = invocation.getArguments().get(index);
+            if (index == statementParameter) {
+                TreePath argumentPath = LowererSupport.resolveTreePath(parsed, argument);
+                Element callerHandle = argumentPath == null ? null : parsed.trees().getElement(argumentPath);
+                StatementState state = callerHandle == null ? null : statementHandles.get(callerHandle);
+                if (state == null) {
+                    throw new IllegalArgumentException("inline JDBC binder helper requires a prepared statement local "
+                            + "as its handle argument: " + invocation);
+                }
+                handleAliases.put(parameter, state);
+            } else {
+                substitutions.put(parameter, ExpressionLowerer.lowerExpression(argument, parsed));
+            }
+        }
+
+        int inlineId = inlineHelperCounter++;
+        Map<Element, String> renamedLocals = new HashMap<>();
+        TreePath bodyPath = new TreePath(methodPath, methodTree.getBody());
+        new TreePathScanner<Void, Void>() {
+            @Override
+            public Void visitVariable(VariableTree node, Void unused) {
+                Element element = parsed.trees().getElement(getCurrentPath());
+                if (element != null && element.getKind() == ElementKind.LOCAL_VARIABLE) {
+                    renamedLocals.put(element, "__titan_inline_" + inlineId + "_" + node.getName());
+                }
+                return super.visitVariable(node, unused);
+            }
+        }.scan(bodyPath, null);
+
+        ExpressionLowerer.InlineVariableResolver previousResolver =
+                ExpressionLowerer.swapInlineVariables(element -> {
+                    ExpressionNode substitution = substitutions.get(element);
+                    if (substitution != null) return substitution;
+                    String renamed = renamedLocals.get(element);
+                    return renamed == null ? null : new VariableRefExpression(renamed);
+                });
+        Map<Element, String> previousNames = inlineVariableNames;
+        inlineVariableNames = renamedLocals;
+        handleAliases.forEach(statementHandles::put);
+        inlineHelperDepth++;
+        try {
+            Block inlined = lowerBlock(bodyPath);
+            declarations.addAll(inlined.declarations());
+            statements.addAll(inlined.statements());
+        } finally {
+            inlineHelperDepth--;
+            for (Element parameter : handleAliases.keySet()) {
+                statementHandles.remove(parameter);
+            }
+            inlineVariableNames = previousNames;
+            ExpressionLowerer.swapInlineVariables(previousResolver);
+        }
+        return true;
+    }
 
     private JdbcDisposition lowerJdbcInvocation(
             MethodInvocationTree invocation,
@@ -1204,6 +1360,11 @@ final class JdbcStatementLowerer {
             return;
         }
         state.binds.put(ordinal, args.get(1));
+        if (inlineHelperDepth > 0) {
+            ExpressionTree value = args.get(1);
+            state.inlineBindValues.put(ordinal, ExpressionLowerer.lowerExpression(value, parsed));
+            state.inlineBindTypes.put(ordinal, safeMap(typeOfBind(value)));
+        }
     }
 
     // ---- (3) I-4 single-row reads ----
@@ -1252,10 +1413,14 @@ final class JdbcStatementLowerer {
                     + "`Type local = rs.getX(col)` read (docs/transpilable-jdbc-subset.md §3.3).");
             return;
         }
-        // The single-row read lowers to a dynamic PREPARE/EXECUTE … INTO on MySQL — forbidden inside a
-        // stored FUNCTION (§9 invariant 1).
-        rejectIfMysqlStoredFunctionEmitsDynamicSql("single-row ResultSet read");
-        statements.add(new RawReadIntoStatement(List.copyOf(intoTargets), buildRawSql(driver, declarations, statements)));
+        RawSql query = buildRawSql(driver, declarations, statements);
+        // MySQL emits a constant/bind-only single-row read as a static SELECT ... INTO, which is
+        // legal inside a stored FUNCTION. Only an explicit structural splice needs PREPARE/EXECUTE
+        // and therefore trips §9 invariant 1 / ERROR 1336.
+        if (query.hasSpliceBinds()) {
+            rejectIfMysqlStoredFunctionEmitsDynamicSql("dynamic single-row ResultSet read");
+        }
+        statements.add(new RawReadIntoStatement(List.copyOf(intoTargets), query));
     }
 
     private int lowerGuardThrowRead(
@@ -1296,9 +1461,11 @@ final class JdbcStatementLowerer {
         RaiseStatement notFoundRaise = thrown instanceof com.sun.source.tree.ThrowTree throwTree
                 ? StatementLowerer.lowerThrow(throwTree, new TreePath(path, throwTree), parsed)
                 : null;
-        // The single-row read lowers to a dynamic PREPARE/EXECUTE … INTO on MySQL — forbidden inside a
-        // stored FUNCTION (§9 invariant 1).
-        rejectIfMysqlStoredFunctionEmitsDynamicSql("single-row ResultSet read");
+        // A constant/bind-only MySQL read is emitted statically and is legal in a function. Preserve
+        // the dynamic-SQL reject only for structural splices that actually require PREPARE/EXECUTE.
+        if (query.hasSpliceBinds()) {
+            rejectIfMysqlStoredFunctionEmitsDynamicSql("dynamic single-row ResultSet read");
+        }
         statements.add(new RawReadIntoStatement(List.copyOf(intoTargets), query, notFoundRaise));
         return next;
     }
@@ -1373,18 +1540,6 @@ final class JdbcStatementLowerer {
     ) {
         Element resultSet = shapes.resultSetNextReceiver(JdbcShapes.unwrap(whileTree.getCondition()), path);
         StatementState driver = driverStateFor(resultSet);
-
-        // Nested-cursor reject (§3.3), shared with the recognizer via JdbcShapes.bodyOpensNestedCursor:
-        // a second ResultSet opened inside the loop is rejected in v1. Without this guard the inner
-        // PreparedStatement local would lower through the stock path and crash with a misleading
-        // 'No SQL type mapping for java.sql.PreparedStatement' (WS-C Phase 2b audit: the recognizer
-        // rejects this shape with an actionable message, so the lowerer must too — before lowering the
-        // body).
-        if (shapes.bodyOpensNestedCursor(whileTree.getStatement(), resultSet, path)) {
-            diagnostics.error("a second ResultSet opened inside while (rs.next()) is rejected in v1 (nested "
-                    + "cursors are §7 open-question territory; docs/transpilable-jdbc-subset.md §3.3)");
-            return;
-        }
 
         // A FUSED (§3.6 form 1) / collection-IN (form 2) cursor does NOT use its own runtime sqlArg —
         // buildRawSql emits the fully-constant fused / array-bind text instead — so neither the strict-splice
@@ -1463,7 +1618,10 @@ final class JdbcStatementLowerer {
 
     private Block lowerLoopBody(StatementTree bodyStatement, TreePath bodyPath) {
         if (bodyStatement instanceof BlockTree) {
-            return StatementLowerer.lowerBlock(bodyPath, parsed);
+            // Preserve JDBC handle/bind state while lowering an inner cursor. The outer row-read
+            // resolver is already installed by lowerCursorLoop and the inner call nests/restores
+            // its own resolver, so this is safe for lexical ResultSet scopes.
+            return lowerBlock(bodyPath);
         }
         return new Block(List.of(), List.of(StatementLowerer.lowerStatement(bodyStatement, bodyPath, parsed)), List.of());
     }
@@ -2153,7 +2311,16 @@ final class JdbcStatementLowerer {
             if (boundExpr == null) {
                 continue;
             }
-            names.add(bindNameFor(boundExpr, blockDecls, statements));
+            ExpressionNode inlineValue = state.inlineBindValues.get(ordinal);
+            if (inlineValue != null) {
+                names.add(synthesizeBindLocal(
+                        inlineValue,
+                        state.inlineBindTypes.getOrDefault(ordinal, new TTextType()),
+                        blockDecls,
+                        statements));
+            } else {
+                names.add(bindNameFor(boundExpr, blockDecls, statements));
+            }
         }
         return names;
     }
@@ -2187,10 +2354,22 @@ final class JdbcStatementLowerer {
             List<DeclarationNode> blockDecls,
             List<StatementNode> statements
     ) {
+        return synthesizeBindLocal(
+                ExpressionLowerer.lowerExpression(boundExpr, parsed),
+                safeMap(typeOfBind(boundExpr)),
+                blockDecls,
+                statements);
+    }
+
+    private String synthesizeBindLocal(
+            ExpressionNode value,
+            TirType type,
+            List<DeclarationNode> blockDecls,
+            List<StatementNode> statements
+    ) {
         bindLocalCounter++;
         String bindLocal = "__titan_p" + bindLocalCounter;
-        ExpressionNode value = ExpressionLowerer.lowerExpression(boundExpr, parsed);
-        blockDecls.add(new DeclareVariable(bindLocal, safeMap(typeOfBind(boundExpr)), true, null));
+        blockDecls.add(new DeclareVariable(bindLocal, type, true, null));
         statements.add(new Assign(new VariableRefExpression(bindLocal), value));
         return bindLocal;
     }
@@ -2346,6 +2525,9 @@ final class JdbcStatementLowerer {
     private static final class StatementState {
         ExpressionTree sqlArg;
         final Map<Integer, ExpressionTree> binds = new LinkedHashMap<>();
+        /** Pre-lowered bind values captured while an inline helper's substitutions are active. */
+        final Map<Integer, ExpressionNode> inlineBindValues = new LinkedHashMap<>();
+        final Map<Integer, TirType> inlineBindTypes = new LinkedHashMap<>();
         // I-7 (§6.3 / I-R8): prepareStatement(SQL, RETURN_GENERATED_KEYS) — the executeUpdate over
         // this statement reaches the I-R8 reject (no Catalog to resolve the RETURNING key column).
         boolean returnGeneratedKeys;

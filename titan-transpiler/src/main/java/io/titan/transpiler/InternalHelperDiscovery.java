@@ -67,6 +67,17 @@ public final class InternalHelperDiscovery {
                 if (helper.methodTree().getBody() == null || isEnumMethod(helper.method())) {
                     continue;
                 }
+                // A source-local static void helper carrying a JDBC handle is a compile-time binder
+                // fragment. JdbcStatementLowerer inlines it into the owning statement state; emitting
+                // it as an SQL routine would expose an infrastructure handle as a routine parameter
+                // and sever prepare/bind/execute provenance.
+                if (isInlineJdbcHelper(helper.method())) {
+                    // The binder itself is not emitted, but calls in its body become direct calls in
+                    // the owning routine after inlining. Scan its dependency closure so those ordinary
+                    // scalar helpers are still discovered and emitted.
+                    queue.addLast(calledKey);
+                    continue;
+                }
                 DiscoveredEntryPoint helperEntryPoint = toInternalEntryPoint(parsedSources, helper);
                 helpersByKey.put(calledKey, helperEntryPoint);
                 queue.addLast(calledKey);
@@ -74,6 +85,20 @@ public final class InternalHelperDiscovery {
         }
 
         return List.copyOf(helpersByKey.values());
+    }
+
+    private static boolean isInlineJdbcHelper(ExecutableElement method) {
+        if (method == null || method.getReturnType().getKind() != TypeKind.VOID
+                || !method.getModifiers().contains(Modifier.STATIC)) {
+            return false;
+        }
+        for (VariableElement parameter : method.getParameters()) {
+            String type = parameter.asType().toString();
+            if (type.equals("java.sql.PreparedStatement") || type.equals("java.sql.CallableStatement")) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static Map<String, MethodLocation> sourceMethods(ParsedSources parsedSources) {

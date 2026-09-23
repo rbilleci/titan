@@ -38,8 +38,9 @@ public final class JavaTypeToTirMapper {
             // char policy: a Java char is represented as single-character TEXT. Both historic
             // mappers only reached this via the silent TEXT fallback; now explicit.
             case CHAR -> new TTextType();
-            // TODO plan-1.2: should be DOUBLE PRECISION once TIR gains a double type
-            case FLOAT, DOUBLE -> new TNumericType(38, 10);
+            // Java floating-point values keep IEEE-754 range/rounding rather than being
+            // silently narrowed to fixed-scale NUMERIC. BigDecimal remains TNumericType.
+            case FLOAT, DOUBLE -> new TDoubleType();
             case VOID -> new TVoidType();
             // byte[] is an opaque binary payload (BYTEA/LONGBLOB), NOT an array of integers.
             case ARRAY -> ((ArrayType) typeMirror).getComponentType().getKind() == javax.lang.model.type.TypeKind.BYTE
@@ -186,9 +187,9 @@ public final class JavaTypeToTirMapper {
             case "long", "java.lang.Long", "Long" -> new TBigintType();
             // char policy: a Java char is represented as single-character TEXT (see map(TypeMirror)).
             case "char", "java.lang.Character", "Character" -> new TTextType();
-            // TODO plan-1.2: float/double should be DOUBLE PRECISION once TIR gains a double type
             case "float", "java.lang.Float", "Float",
-                    "double", "java.lang.Double", "Double",
+                    "double", "java.lang.Double", "Double" -> new TDoubleType();
+            case
                     "java.math.BigDecimal", "BigDecimal",
                     "java.math.BigInteger", "BigInteger" -> new TNumericType(38, 10);
             case "java.lang.String", "String" -> new TTextType();

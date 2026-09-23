@@ -7,13 +7,17 @@ BEGIN
     DECLARE v_total INT;
     DECLARE v_n INT;
     DECLARE __titan_saved_time_zone VARCHAR(64) DEFAULT @@session.time_zone;
+    DECLARE __titan_time_zone_pinned BOOLEAN DEFAULT FALSE;
     DECLARE __titan_return_value INT;
     DECLARE EXIT HANDLER FOR SQLEXCEPTION
     BEGIN
-        SET time_zone = __titan_saved_time_zone;
+        IF __titan_time_zone_pinned THEN SET time_zone = __titan_saved_time_zone; END IF;
         RESIGNAL;
     END;
-    SET time_zone = '+00:00';
+    IF @@session.time_zone <> '+00:00' THEN
+        SET time_zone = '+00:00';
+        SET __titan_time_zone_pinned = TRUE;
+    END IF;
     SET v_total = 0;
     SET v_n = p_start;
     BEGIN
@@ -37,8 +41,8 @@ BEGIN
     END LOOP titan_loop_1;
     END;
     SET __titan_return_value = v_total;
-    SET time_zone = __titan_saved_time_zone;
+    IF __titan_time_zone_pinned THEN SET time_zone = __titan_saved_time_zone; END IF;
     RETURN __titan_return_value;
-    SET time_zone = __titan_saved_time_zone;
+    IF __titan_time_zone_pinned THEN SET time_zone = __titan_saved_time_zone; END IF;
 END$$
 DELIMITER ;

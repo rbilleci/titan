@@ -30,6 +30,13 @@ import java.util.Objects;
  */
 public final class TitanArtifactInstallVerifier {
 
+    // JDBC sends a complete SQL statement in one MySQL protocol packet. Leave a small fixed
+    // reserve for packet framing so a statement that is merely one byte below the server setting
+    // cannot still fail during installation. This is deliberately package-derived, not a global
+    // 16 MiB policy: a small Titan package should remain installable on a safely configured small
+    // server, while a larger generated routine fails before any package SQL is attempted.
+    private static final long MYSQL_PACKET_PROTOCOL_RESERVE_BYTES = 64L * 1024L;
+
     private TitanArtifactInstallVerifier() {
     }
 
@@ -150,6 +157,15 @@ public final class TitanArtifactInstallVerifier {
             List<TitanInstallVerification.Diagnostic> diagnostics,
             List<TitanInstallVerification.Drift> drift
     ) {
+        List<Path> sqlFiles = sqlFilesOrderedByPlan(dialect, inventory, installPlan, packagedSqlByObjectId);
+        if (dialect.equals("mysql") && !preflightMysqlPacketLimit(
+                database.connection(), dialect, sqlFiles, diagnostics)) {
+            // A package install must be atomic from the verifier's perspective. Do not begin
+            // executing migrations after establishing that a later routine cannot traverse the
+            // target's JDBC/MySQL packet boundary.
+            return new TitanInstallVerification.DialectReport(dialect, "failed", List.of());
+        }
+
         // Canonical-to-canonical drift: capture what the database had BEFORE the install...
         Map<String, String> preInstallDefinitions = new LinkedHashMap<>();
         for (TitanObjectInventory.GeneratedObject object : routineObjects(inventory, dialect)) {
@@ -159,7 +175,7 @@ public final class TitanArtifactInstallVerifier {
             }
         }
 
-        for (Path sqlFile : sqlFilesOrderedByPlan(dialect, inventory, installPlan, packagedSqlByObjectId)) {
+        for (Path sqlFile : sqlFiles) {
             executeScript(database.connection(), dialect, sqlFile, diagnostics);
         }
 
@@ -224,6 +240,109 @@ public final class TitanArtifactInstallVerifier {
                 ? "failed"
                 : "passed";
         return new TitanInstallVerification.DialectReport(dialect, status, verifiedObjects);
+    }
+
+    /**
+     * Checks a target MySQL server before any package statement is sent. MySQL reports the limit
+     * in bytes, while package migrations can contain a single generated CREATE PROCEDURE that is
+     * much larger than the historical 1 MiB default. Letting Connector/J discover that midway
+     * through an install produces a transport exception and potentially a partially applied
+     * package; this check reports the exact safe minimum first.
+     */
+    private static boolean preflightMysqlPacketLimit(
+            Connection connection,
+            String dialect,
+            List<Path> sqlFiles,
+            List<TitanInstallVerification.Diagnostic> diagnostics
+    ) {
+        List<String> statements = new ArrayList<>();
+        for (Path sqlFile : sqlFiles) {
+            try {
+                String script = Files.readString(sqlFile, StandardCharsets.UTF_8);
+                if (!script.isBlank()) {
+                    statements.addAll(TitanSqlScripts.split(script));
+                }
+            } catch (IOException exception) {
+                diagnostics.add(new TitanInstallVerification.Diagnostic(
+                        dialect,
+                        "preflight.mysql.max-allowed-packet." + sqlFile.getFileName(),
+                        "",
+                        "TITAN-GAP005-PACKAGE-READ",
+                        stableMessage(exception)));
+                return false;
+            }
+        }
+        MysqlPacketRequirement requirement = mysqlPacketRequirement(statements);
+        if (requirement.requiredBytes() == 0L) {
+            return true;
+        }
+        long configuredBytes;
+        try (Statement statement = connection.createStatement();
+             ResultSet resultSet = statement.executeQuery("SELECT @@max_allowed_packet")) {
+            if (!resultSet.next()) {
+                throw new SQLException("MySQL did not return @@max_allowed_packet");
+            }
+            configuredBytes = resultSet.getLong(1);
+            if (resultSet.wasNull() || configuredBytes <= 0L) {
+                throw new SQLException("MySQL returned an invalid @@max_allowed_packet");
+            }
+        } catch (SQLException exception) {
+            diagnostics.add(new TitanInstallVerification.Diagnostic(
+                    dialect,
+                    "preflight.mysql.max-allowed-packet",
+                    "",
+                    "TITAN-GAP005-MYSQL-PACKET-PREFLIGHT",
+                    "Unable to read MySQL @@max_allowed_packet before package installation: "
+                            + stableMessage(exception)));
+            return false;
+        }
+        String error = mysqlPacketPreflightError(configuredBytes, requirement);
+        if (error.length() == 0) {
+            return true;
+        }
+        diagnostics.add(new TitanInstallVerification.Diagnostic(
+                dialect,
+                "preflight.mysql.max-allowed-packet",
+                "",
+                "TITAN-GAP005-MYSQL-PACKET-PREFLIGHT",
+                error));
+        return false;
+    }
+
+    /** Package-visible pure calculation so the packet boundary has non-Docker regression coverage. */
+    static MysqlPacketRequirement mysqlPacketRequirement(List<String> statements) {
+        long largestStatementBytes = 0L;
+        if (statements != null) {
+            for (String statement : statements) {
+                if (statement != null) {
+                    largestStatementBytes = Math.max(largestStatementBytes,
+                            statement.getBytes(StandardCharsets.UTF_8).length);
+                }
+            }
+        }
+        long requiredBytes = largestStatementBytes == 0L ? 0L
+                : Math.addExact(largestStatementBytes, MYSQL_PACKET_PROTOCOL_RESERVE_BYTES);
+        return new MysqlPacketRequirement(largestStatementBytes, requiredBytes);
+    }
+
+    /** Empty means a target setting can safely transmit every packaged statement. */
+    static String mysqlPacketPreflightError(long configuredBytes, MysqlPacketRequirement requirement) {
+        if (requirement == null || requirement.requiredBytes() == 0L
+                || configuredBytes >= requirement.requiredBytes()) {
+            return "";
+        }
+        return "MySQL @@max_allowed_packet is " + configuredBytes + " bytes, but this package contains a "
+                + requirement.largestStatementBytes() + " byte SQL statement and requires at least "
+                + requirement.requiredBytes() + " bytes including protocol reserve. Increase max_allowed_packet "
+                + "before installation; no package SQL was executed.";
+    }
+
+    record MysqlPacketRequirement(long largestStatementBytes, long requiredBytes) {
+        MysqlPacketRequirement {
+            if (largestStatementBytes < 0L || requiredBytes < largestStatementBytes) {
+                throw new IllegalArgumentException("MySQL packet requirement must be non-negative and monotonic");
+            }
+        }
     }
 
     private static List<TitanObjectInventory.GeneratedObject> routineObjects(

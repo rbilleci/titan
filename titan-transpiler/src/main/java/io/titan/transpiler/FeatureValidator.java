@@ -367,7 +367,7 @@ public final class FeatureValidator {
         io.titan.transpiler.jdbc.JdbcTypeOracle jdbcOracle =
                 new io.titan.transpiler.jdbc.JdbcTypeOracle(parsedSources);
         boolean methodBearsJdbcHandles =
-                methodBodyBearsJdbcHandles(method, methodPath.getCompilationUnit(), parsedSources, jdbcOracle);
+                methodBodyBearsJdbcHandles(method, methodPath, parsedSources, jdbcOracle);
         java.util.Set<Element> params = new java.util.HashSet<>();
         for (io.titan.transpiler.jdbc.JdbcCollectionInRecognizer.CollectionInPlan plan
                 : collectionInPlans(method, methodPath, parsedSources, jdbcOracle, methodBearsJdbcHandles)) {
@@ -410,7 +410,7 @@ public final class FeatureValidator {
     /** Whether {@code method}'s body declares — anywhere — a java.sql/javax.sql handle local/resource. */
     private static boolean methodBodyBearsJdbcHandles(
             MethodTree method,
-            CompilationUnitTree unit,
+            TreePath methodPath,
             ParsedSources parsedSources,
             io.titan.transpiler.jdbc.JdbcTypeOracle oracle
     ) {
@@ -418,11 +418,12 @@ public final class FeatureValidator {
             return false;
         }
         boolean[] found = {false};
-        new TreeScanner<Void, Void>() {
+        TreePath bodyPath = new TreePath(methodPath, method.getBody());
+        new TreePathScanner<Void, Void>() {
             @Override
             public Void visitVariable(com.sun.source.tree.VariableTree node, Void unused) {
                 if (!found[0]) {
-                    TreePath path = TreePath.getPath(unit, node);
+                    TreePath path = getCurrentPath();
                     TypeMirror type = path == null ? null : parsedSources.trees().getTypeMirror(path);
                     if (type != null && oracle.isJdbcHandle(type)) {
                         found[0] = true;
@@ -430,8 +431,33 @@ public final class FeatureValidator {
                 }
                 return super.visitVariable(node, unused);
             }
-        }.scan(method.getBody(), null);
+        }.scan(bodyPath, null);
         return found[0];
+    }
+
+    /**
+     * Indexes every node in a method body once. Feature validation performs many type and element
+     * lookups; {@link TreePath#getPath(CompilationUnitTree, Tree)} rescans the entire compilation
+     * unit for each lookup, which is prohibitively expensive for generated routines. The identity
+     * index preserves javac's exact paths while making those lookups constant-time.
+     */
+    private static Map<Tree, TreePath> methodBodyTreePaths(MethodTree method, TreePath methodPath) {
+        if (method.getBody() == null) {
+            return Map.of();
+        }
+        java.util.IdentityHashMap<Tree, TreePath> paths = new java.util.IdentityHashMap<>();
+        TreePath bodyPath = new TreePath(methodPath, method.getBody());
+        paths.put(method.getBody(), bodyPath);
+        new TreePathScanner<Void, Void>() {
+            @Override
+            public Void scan(Tree tree, Void unused) {
+                if (tree != null) {
+                    paths.put(tree, new TreePath(getCurrentPath(), tree));
+                }
+                return super.scan(tree, unused);
+            }
+        }.scan(bodyPath, null);
+        return paths;
     }
 
     private static void validateMethodBody(
@@ -452,7 +478,7 @@ public final class FeatureValidator {
         // rejected if unsupported) through the stock lowering path the JDBC lowerer delegates to.
         io.titan.transpiler.jdbc.JdbcTypeOracle jdbcOracle =
                 new io.titan.transpiler.jdbc.JdbcTypeOracle(parsedSources);
-        boolean methodBearsJdbcHandles = methodBodyBearsJdbcHandles(method, unit, parsedSources, jdbcOracle);
+        boolean methodBearsJdbcHandles = methodBodyBearsJdbcHandles(method, methodPath, parsedSources, jdbcOracle);
         // WS-C Phase 3 Rung 2 (§3.6 form 1): when the JDBC front-end will FUSE a prior query into a
         // later IN-subquery, it ELIDES the intermediate collection (the `new ArrayList`, the
         // `ids.add(...)` accumulation, and the `ids.size()` sizing the run). Those constructs are
@@ -495,6 +521,7 @@ public final class FeatureValidator {
         // JdbcGuardedPredicateRecognizer the lowerer uses, so the validator and the lowerer agree.
         java.util.Set<com.sun.source.tree.Tree> guardedPredicateSubsumedTrees =
                 guardedPredicateSubsumedTrees(method, methodPath, parsedSources, jdbcOracle, methodBearsJdbcHandles);
+        Map<Tree, TreePath> treePaths = methodBodyTreePaths(method, methodPath);
         new TreeScanner<Void, Void>() {
             /**
              * Innermost-first stack of the enclosing constructs that matter for break/continue
@@ -503,6 +530,10 @@ public final class FeatureValidator {
              * crossing them would skip the emitted finally statements).
              */
             private final Deque<Tree.Kind> controlContext = new ArrayDeque<>();
+
+            private TreePath treePath(Tree tree) {
+                return treePaths.get(tree);
+            }
 
             @Override
             public Void scan(Tree tree, Void unused) {
@@ -597,8 +628,8 @@ public final class FeatureValidator {
              * reference and {@code (Object)} casts) keeps a positioned rejection.
              */
             private void validateTypeCast(TypeCastTree node) {
-                TreePath sourcePath = TreePath.getPath(unit, node.getExpression());
-                TreePath targetPath = TreePath.getPath(unit, node.getType());
+                TreePath sourcePath = treePath(node.getExpression());
+                TreePath targetPath = treePath(node.getType());
                 JavaCastClassifier.Classification classification = JavaCastClassifier.classify(
                         sourcePath == null ? null : parsedSources.trees().getTypeMirror(sourcePath),
                         targetPath == null ? null : parsedSources.trees().getTypeMirror(targetPath),
@@ -813,7 +844,7 @@ public final class FeatureValidator {
             }
 
             private boolean isEnumExhaustive(Tree selector, List<? extends CaseTree> cases) {
-                TreePath selectorPath = TreePath.getPath(unit, selector);
+                TreePath selectorPath = treePath(selector);
                 if (selectorPath == null) {
                     return false;
                 }
@@ -1070,7 +1101,7 @@ public final class FeatureValidator {
 
             /** {@code String.format(...)} — resolved against java.lang.String, with a syntactic fallback. */
             private boolean isStringFormatInvocation(MethodInvocationTree node) {
-                TreePath invocationPath = TreePath.getPath(unit, node);
+                TreePath invocationPath = treePath(node);
                 if (invocationPath != null
                         && parsedSources.trees().getElement(invocationPath) instanceof ExecutableElement method
                         && "format".contentEquals(method.getSimpleName())
@@ -1099,7 +1130,7 @@ public final class FeatureValidator {
             }
 
             private boolean isClassForNameInvocation(MethodInvocationTree node) {
-                TreePath invocationPath = TreePath.getPath(unit, node);
+                TreePath invocationPath = treePath(node);
                 if (invocationPath != null
                         && parsedSources.trees().getElement(invocationPath) instanceof ExecutableElement method
                         && "forName".contentEquals(method.getSimpleName())
@@ -1122,7 +1153,7 @@ public final class FeatureValidator {
                 if (!(node.getMethodSelect() instanceof MemberSelectTree memberSelectTree)) {
                     return false;
                 }
-                TreePath receiverPath = TreePath.getPath(unit, memberSelectTree.getExpression());
+                TreePath receiverPath = treePath(memberSelectTree.getExpression());
                 if (receiverPath == null) {
                     return false;
                 }
@@ -1137,7 +1168,7 @@ public final class FeatureValidator {
                 if (isStaticMethodInvocation(node) || isCollectionInvocation(node) || isTriggerRowAccessorInvocation(node)) {
                     return false;
                 }
-                TreePath receiverPath = TreePath.getPath(unit, memberSelectTree.getExpression());
+                TreePath receiverPath = treePath(memberSelectTree.getExpression());
                 if (receiverPath == null) {
                     return false;
                 }
@@ -1164,7 +1195,7 @@ public final class FeatureValidator {
                     // by DslQueryLowerer, not runtime dispatch.
                     return false;
                 }
-                TreePath receiverPath = TreePath.getPath(unit, memberSelectTree.getExpression());
+                TreePath receiverPath = treePath(memberSelectTree.getExpression());
                 if (receiverPath == null) {
                     return false;
                 }
@@ -1190,7 +1221,7 @@ public final class FeatureValidator {
             }
 
             private boolean isCompilerKnownConcreteReceiver(Tree receiver, TypeElement owner) {
-                TreePath receiverPath = TreePath.getPath(unit, receiver);
+                TreePath receiverPath = treePath(receiver);
                 Element receiverElement = receiverPath == null ? null : parsedSources.trees().getElement(receiverPath);
                 if (!(receiverElement instanceof javax.lang.model.element.VariableElement variable)) {
                     return false;
@@ -1283,7 +1314,7 @@ public final class FeatureValidator {
                         || isTriggerRowAccessorInvocation(node)) {
                     return false;
                 }
-                TreePath receiverPath = TreePath.getPath(unit, memberSelectTree.getExpression());
+                TreePath receiverPath = treePath(memberSelectTree.getExpression());
                 if (receiverPath == null) {
                     return false;
                 }
@@ -1356,7 +1387,7 @@ public final class FeatureValidator {
             }
 
             private TypeElement constructedRecordType(NewClassTree node) {
-                TreePath path = TreePath.getPath(unit, node);
+                TreePath path = treePath(node);
                 Element element = path == null ? null : parsedSources.trees().getElement(path);
                 if (!(element instanceof ExecutableElement constructor)
                         || !(constructor.getEnclosingElement() instanceof TypeElement owner)
@@ -1367,7 +1398,7 @@ public final class FeatureValidator {
             }
 
             private ExecutableElement resolvedExecutable(MethodInvocationTree node) {
-                TreePath path = TreePath.getPath(unit, node);
+                TreePath path = treePath(node);
                 Element element = path == null ? null : parsedSources.trees().getElement(path);
                 return element instanceof ExecutableElement executable ? executable : null;
             }
@@ -1451,7 +1482,7 @@ public final class FeatureValidator {
             }
 
             private String sourceLocalStaticFinalStringConstant(Tree argument) {
-                TreePath argumentPath = TreePath.getPath(unit, argument);
+                TreePath argumentPath = treePath(argument);
                 if (argumentPath == null) {
                     return null;
                 }
@@ -1477,7 +1508,7 @@ public final class FeatureValidator {
                 if (isCompileTimeSafeImmutableListFactory(node)) {
                     return false;
                 }
-                TreePath invocationPath = TreePath.getPath(unit, node);
+                TreePath invocationPath = treePath(node);
                 if (invocationPath != null
                         && parsedSources.trees().getElement(invocationPath) instanceof ExecutableElement method) {
                     TypeMirror ownerType = method.getEnclosingElement().asType();
@@ -1486,7 +1517,7 @@ public final class FeatureValidator {
                 if (!(node.getMethodSelect() instanceof MemberSelectTree memberSelectTree)) {
                     return false;
                 }
-                TreePath receiverPath = TreePath.getPath(unit, memberSelectTree.getExpression());
+                TreePath receiverPath = treePath(memberSelectTree.getExpression());
                 if (receiverPath == null) {
                     return false;
                 }
@@ -1499,7 +1530,7 @@ public final class FeatureValidator {
                         || !"of".contentEquals(memberSelectTree.getIdentifier())) {
                     return false;
                 }
-                TreePath invocationPath = TreePath.getPath(unit, node);
+                TreePath invocationPath = treePath(node);
                 if (invocationPath != null
                         && parsedSources.trees().getElement(invocationPath) instanceof ExecutableElement method
                         && method.getEnclosingElement() instanceof TypeElement owner
@@ -1523,7 +1554,7 @@ public final class FeatureValidator {
             }
 
             private boolean isStaticMethodInvocation(MethodInvocationTree node) {
-                TreePath invocationPath = TreePath.getPath(unit, node);
+                TreePath invocationPath = treePath(node);
                 return invocationPath != null
                         && parsedSources.trees().getElement(invocationPath) instanceof ExecutableElement method
                         && method.getModifiers().contains(Modifier.STATIC);
@@ -1541,7 +1572,7 @@ public final class FeatureValidator {
                         || !(memberSelectTree.getExpression() instanceof MethodInvocationTree receiverInvocation)) {
                     return false;
                 }
-                TreePath receiverPath = TreePath.getPath(unit, receiverInvocation);
+                TreePath receiverPath = treePath(receiverInvocation);
                 if (receiverPath == null
                         || !(parsedSources.trees().getElement(receiverPath) instanceof ExecutableElement receiverMethod)
                         || !(receiverMethod.getEnclosingElement() instanceof TypeElement owner)) {
@@ -1561,7 +1592,7 @@ public final class FeatureValidator {
                 if (!"class".contentEquals(memberSelectTree.getIdentifier())) {
                     return false;
                 }
-                TreePath path = TreePath.getPath(unit, memberSelectTree);
+                TreePath path = treePath(memberSelectTree);
                 return path != null
                         && path.getParentPath() != null
                         && path.getParentPath().getLeaf().getKind() == Tree.Kind.MEMBER_SELECT;
@@ -1571,7 +1602,7 @@ public final class FeatureValidator {
                 if (!"length".contentEquals(memberSelectTree.getIdentifier())) {
                     return false;
                 }
-                TreePath expressionPath = TreePath.getPath(unit, memberSelectTree.getExpression());
+                TreePath expressionPath = treePath(memberSelectTree.getExpression());
                 if (expressionPath == null) {
                     return false;
                 }
@@ -1580,7 +1611,7 @@ public final class FeatureValidator {
             }
 
             private boolean isInstanceFieldAccess(MemberSelectTree memberSelectTree) {
-                TreePath memberPath = TreePath.getPath(unit, memberSelectTree);
+                TreePath memberPath = treePath(memberSelectTree);
                 if (memberPath == null) {
                     return false;
                 }
@@ -1591,7 +1622,7 @@ public final class FeatureValidator {
                         || isDslStructuralField(field.asType())) {
                     return false;
                 }
-                TreePath receiverPath = TreePath.getPath(unit, memberSelectTree.getExpression());
+                TreePath receiverPath = treePath(memberSelectTree.getExpression());
                 if (receiverPath == null) {
                     return false;
                 }
@@ -1774,13 +1805,13 @@ public final class FeatureValidator {
             }
 
             private VariableElement variableElement(VariableTree node) {
-                TreePath path = TreePath.getPath(unit, node);
+                TreePath path = treePath(node);
                 Element element = path == null ? null : parsedSources.trees().getElement(path);
                 return element instanceof VariableElement variable ? variable : null;
             }
 
             private VariableElement variableElement(Tree tree) {
-                TreePath path = TreePath.getPath(unit, stripParentheses(tree));
+                TreePath path = treePath(stripParentheses(tree));
                 Element element = path == null ? null : parsedSources.trees().getElement(path);
                 return element instanceof VariableElement variable ? variable : null;
             }
@@ -1842,7 +1873,7 @@ public final class FeatureValidator {
             }
 
             private String sourceLocalStaticFinalStringConstantAllowBlank(Tree argument) {
-                TreePath argumentPath = TreePath.getPath(unit, argument);
+                TreePath argumentPath = treePath(argument);
                 if (argumentPath == null) {
                     return null;
                 }
@@ -2022,7 +2053,7 @@ public final class FeatureValidator {
                 if (stripped instanceof LiteralTree literal && literal.getValue() instanceof Integer value) {
                     return value;
                 }
-                TreePath argumentPath = TreePath.getPath(unit, stripped);
+                TreePath argumentPath = treePath(stripped);
                 if (argumentPath == null) {
                     return null;
                 }
@@ -2049,7 +2080,7 @@ public final class FeatureValidator {
             }
 
             private Integer compilerKnownCursorStateAtLoop(WhileLoopTree node, String cursorName) {
-                TreePath loopPath = TreePath.getPath(unit, node);
+                TreePath loopPath = treePath(node);
                 if (loopPath == null
                         || loopPath.getParentPath() == null
                         || !(loopPath.getParentPath().getLeaf() instanceof BlockTree blockTree)) {
@@ -2347,7 +2378,7 @@ public final class FeatureValidator {
             }
 
             private boolean referencesVariable(Tree tree, VariableElement variable) {
-                TreePath path = TreePath.getPath(unit, stripParentheses(tree));
+                TreePath path = treePath(stripParentheses(tree));
                 Element element = path == null ? null : parsedSources.trees().getElement(path);
                 return variable.equals(element);
             }
@@ -2381,7 +2412,7 @@ public final class FeatureValidator {
             }
 
             private TypeMirror typeOf(Tree tree) {
-                TreePath path = TreePath.getPath(unit, tree);
+                TreePath path = treePath(tree);
                 return path == null ? null : parsedSources.trees().getTypeMirror(path);
             }
 
@@ -2418,7 +2449,7 @@ public final class FeatureValidator {
                         || !"length".contentEquals(select.getIdentifier())) {
                     return null;
                 }
-                TreePath receiverPath = TreePath.getPath(unit, select.getExpression());
+                TreePath receiverPath = treePath(select.getExpression());
                 TypeMirror receiverType = receiverPath == null ? null : parsedSources.trees().getTypeMirror(receiverPath);
                 return receiverType != null && "java.lang.String".equals(receiverType.toString())
                         ? receiverKey(select.getExpression())
@@ -2467,7 +2498,7 @@ public final class FeatureValidator {
             }
 
             private boolean hasNonNegativeCursorStateAtLoop(WhileLoopTree node, String cursorName) {
-                TreePath loopPath = TreePath.getPath(unit, node);
+                TreePath loopPath = treePath(node);
                 if (loopPath == null
                         || loopPath.getParentPath() == null
                         || !(loopPath.getParentPath().getLeaf() instanceof BlockTree blockTree)) {
@@ -2529,7 +2560,7 @@ public final class FeatureValidator {
                         || !cursorName.equals(argument.getName().toString())) {
                     return false;
                 }
-                TreePath receiverPath = TreePath.getPath(unit, select.getExpression());
+                TreePath receiverPath = treePath(select.getExpression());
                 TypeMirror receiverType = receiverPath == null ? null : parsedSources.trees().getTypeMirror(receiverPath);
                 return receiverType != null && "java.lang.String".equals(receiverType.toString());
             }
@@ -2542,7 +2573,7 @@ public final class FeatureValidator {
             }
 
             private ReceiverKey receiverKey(Tree receiver) {
-                TreePath receiverPath = TreePath.getPath(unit, receiver);
+                TreePath receiverPath = treePath(receiver);
                 Element element = receiverPath == null ? null : parsedSources.trees().getElement(receiverPath);
                 if (element != null) {
                     return new ReceiverKey("element:" + element);
@@ -2718,7 +2749,7 @@ public final class FeatureValidator {
             }
 
             private boolean isThrownExceptionConstruction(Tree tree) {
-                TreePath path = TreePath.getPath(unit, tree);
+                TreePath path = treePath(tree);
                 return path != null
                         && path.getParentPath() != null
                         && path.getParentPath().getLeaf().getKind() == Tree.Kind.THROW;

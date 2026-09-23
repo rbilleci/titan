@@ -5,12 +5,16 @@ SQL SECURITY INVOKER
 BEGIN
     DECLARE v_already_applied BOOLEAN;
     DECLARE __titan_saved_time_zone VARCHAR(64) DEFAULT @@session.time_zone;
+    DECLARE __titan_time_zone_pinned BOOLEAN DEFAULT FALSE;
     DECLARE EXIT HANDLER FOR SQLEXCEPTION
     BEGIN
-        SET time_zone = __titan_saved_time_zone;
+        IF __titan_time_zone_pinned THEN SET time_zone = __titan_saved_time_zone; END IF;
         RESIGNAL;
     END;
-    SET time_zone = '+00:00';
+    IF @@session.time_zone <> '+00:00' THEN
+        SET time_zone = '+00:00';
+        SET __titan_time_zone_pinned = TRUE;
+    END IF;
     proc_body: BEGIN
         SELECT EXISTS (SELECT `gate_idempotency`.`idempotency_key` FROM `test`.`gate_idempotency` WHERE COALESCE((`gate_idempotency`.`idempotency_key` = p_key), FALSE)) INTO v_already_applied;
         IF COALESCE(v_already_applied, FALSE) THEN
@@ -20,6 +24,6 @@ BEGIN
         INSERT INTO `test`.`gate_audit` (`idempotency_key`, `name`) VALUES (p_key, p_name);
         INSERT INTO `test`.`gate_idempotency` (`idempotency_key`) VALUES (p_key);
     END;
-    SET time_zone = __titan_saved_time_zone;
+    IF __titan_time_zone_pinned THEN SET time_zone = __titan_saved_time_zone; END IF;
 END$$
 DELIMITER ;

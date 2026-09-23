@@ -58,6 +58,116 @@ class TranspilationPipelineUnresolvedHelperTest {
     }
 
     @Test
+    void omitsJdbcInfrastructureArgumentsFromInternalRoutineCalls() throws Exception {
+        Path source = tempDir.resolve("JdbcInfrastructureHelperFunction.java");
+        Files.writeString(source, """
+                import java.sql.Connection;
+                import javax.sql.DataSource;
+                import titan.dsl.StoredFunction;
+
+                class JdbcInfrastructureHelperFunction {
+                    @StoredFunction
+                    static int run(Connection connection, DataSource dataSource, int value) {
+                        return helper(connection, value, dataSource);
+                    }
+
+                    static int helper(Connection connection, int value, DataSource dataSource) {
+                        return value + 1;
+                    }
+                }
+                """);
+
+        for (String dialect : List.of("postgresql", "mysql")) {
+            List<TranspilationPipeline.GeneratedSql> generated = new TranspilationPipeline().transpile(
+                    List.of(source),
+                    List.of(),
+                    List.of(dialect),
+                    List.of("public"),
+                    true);
+
+            String runSql = generated.stream()
+                    .filter(sql -> sql.methodName().equals("run"))
+                    .findFirst()
+                    .orElseThrow()
+                    .sql();
+            String helperSql = generated.stream()
+                    .filter(sql -> sql.methodName().equals("helper"))
+                    .findFirst()
+                    .orElseThrow()
+                    .sql();
+
+            assertTrue(runSql.matches("(?s).*__titan_internal_[a-z0-9_]+\\(p_value\\).*"), runSql);
+            assertTrue(!runSql.contains("p_connection"), runSql);
+            assertTrue(!runSql.contains("p_data_source"), runSql);
+            assertTrue(helperSql.contains("p_value"), helperSql);
+            assertTrue(!helperSql.contains("p_connection"), helperSql);
+            assertTrue(!helperSql.contains("p_data_source"), helperSql);
+        }
+    }
+
+    @Test
+    void observesOnlyThePublicEntryPointWhenItEmitsSourceLocalHelpers() throws Exception {
+        Path source = tempDir.resolve("ObservedInternalHelperFunction.java");
+        Files.writeString(source, """
+                import titan.dsl.StoredFunction;
+
+                class ObservedInternalHelperFunction {
+                    @StoredFunction
+                    static int run(int value) {
+                        return helper(value);
+                    }
+
+                    static int helper(int value) {
+                        return value + 1;
+                    }
+                }
+                """);
+
+        List<TranspilationPipeline.GeneratedSql> generated = new TranspilationPipeline().transpile(
+                List.of(source), List.of(), List.of("postgresql"), List.of("public"), true,
+                List.of(), true, List.of(), false);
+
+        String runSql = generated.stream().filter(sql -> sql.methodName().equals("run")).findFirst().orElseThrow().sql();
+        String helperSql = generated.stream().filter(sql -> sql.methodName().equals("helper")).findFirst().orElseThrow().sql();
+        assertTrue(runSql.contains("INSERT INTO titan_runtime.telemetry"));
+        assertTrue(!helperSql.contains("INSERT INTO titan_runtime.telemetry"));
+    }
+
+    @Test
+    void remapsSourceLocalStaticHelperNestedInLogicalNot() throws Exception {
+        Path source = tempDir.resolve("NegatedInternalHelperFunction.java");
+        Files.writeString(source, """
+                import titan.dsl.StoredFunction;
+
+                class NegatedInternalHelperFunction {
+                    @StoredFunction
+                    static boolean run(int value) {
+                        return !helper(value);
+                    }
+
+                    static boolean helper(int value) {
+                        return value > 0;
+                    }
+                }
+                """);
+
+        List<TranspilationPipeline.GeneratedSql> generated = new TranspilationPipeline().transpile(
+                List.of(source),
+                List.of(),
+                List.of("postgresql"),
+                List.of("public"),
+                true);
+
+        String runSql = generated.stream()
+                .filter(sql -> sql.methodName().equals("run"))
+                .findFirst()
+                .orElseThrow()
+                .sql();
+        assertTrue(runSql.contains("__titan_internal_negated_internal_helper_function_helpe_"));
+        assertTrue(!runSql.contains("NegatedInternalHelperFunction#helper"));
+    }
+
+    @Test
     void emitsNestedSourceLocalStaticHelpersRecursively() throws Exception {
         Path source = tempDir.resolve("NestedInternalHelperFunction.java");
         Files.writeString(source, """

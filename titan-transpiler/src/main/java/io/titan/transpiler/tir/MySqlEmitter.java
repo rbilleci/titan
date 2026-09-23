@@ -24,20 +24,28 @@ public final class MySqlEmitter extends AbstractSqlEmitter {
     // separately from the routine prefix.
     private static final String TELEMETRY_TABLE = "titan_runtime.telemetry";
 
-    // E-8 (plan 3.1): every procedure/function pins the session to UTC ("SET time_zone =
-    // '+00:00'") for deterministic temporal semantics, so the caller's zone must be restored on
-    // every exit path. Mechanism: the caller's @@session.time_zone is saved into the DECLAREd
-    // routine-local variable below (a local, not a session @variable, so nested generated
-    // routines cannot clobber each other's saved value) and restored (a) at the routine tail,
-    // (b) before every RETURN — the return value is staged into __titan_return_value first so
-    // the expression still evaluates under UTC — and (c) inside the single routine-level EXIT
-    // handler, which every procedure/function now declares, before its RESIGNAL.
+    // E-8 (plan 3.1): procedures/functions evaluate temporal expressions in UTC, so the
+    // caller's session zone must be restored on every exit path. A nested generated function
+    // commonly executes beneath a generated procedure that already pins the session to UTC.
+    // Repeating SET time_zone = '+00:00' in every helper function needlessly mutates shared
+    // session state and has exhibited unstable results in long MySQL routine call chains.
+    // Each routine consequently records whether it actually changed the session zone. It pins
+    // only when the caller was not already at the canonical UTC offset, and restores only in
+    // that case. This keeps direct calls deterministic and makes nested calls state-neutral.
     private static final String SAVED_TIME_ZONE_VARIABLE = "__titan_saved_time_zone";
+    private static final String TIME_ZONE_PINNED_VARIABLE = "__titan_time_zone_pinned";
     private static final String RETURN_VALUE_VARIABLE = "__titan_return_value";
+    // Observability obtains its generated telemetry id through LAST_INSERT_ID(), which is a
+    // connection-scoped MySQL register rather than routine-local state. Preserve and restore it
+    // exactly like the time-zone setting so a rolled-back observed request cannot influence the
+    // next request served by the same pooled connection.
+    private static final String SAVED_LAST_INSERT_ID_VARIABLE = "__titan_saved_last_insert_id";
 
     private final Map<String, String> temporalAmountUnits = new HashMap<>();
     private final Map<String, TirType> temporalAmountTypes = new HashMap<>();
     private TirType currentFunctionReturnType = null;
+    /** Dynamic SQL is legal in procedures but prohibited in MySQL stored functions. */
+    private boolean emittingStoredProcedure = false;
     private boolean debugLogEnabled = false;
     /** True while emitting a procedure/function body (which pins and must restore time_zone). */
     private boolean sessionTimeZoneScoped = false;
@@ -106,6 +114,7 @@ public final class MySqlEmitter extends AbstractSqlEmitter {
         temporalAmountTypes.clear();
         resetLoopLabels();
         currentFunctionReturnType = null;
+        emittingStoredProcedure = true;
         observabilityEnabled = observability;
         staticResetKeys = collectStaticResetKeys(body);
         this.routineParameters = List.copyOf(routineParameters == null ? List.of() : routineParameters);
@@ -136,7 +145,7 @@ public final class MySqlEmitter extends AbstractSqlEmitter {
         out.line("BEGIN");
         out.indent();
         emitRoutineDeclarations(body, observability, null);
-        out.line("SET time_zone = '+00:00';");
+        emitMySqlTimeZonePin();
         if (debugLogEnabled) {
             out.line("CREATE TEMPORARY TABLE IF NOT EXISTS __debug_log(message TEXT);");
         }
@@ -163,6 +172,7 @@ public final class MySqlEmitter extends AbstractSqlEmitter {
             out.line("  status = 'success', finished_at = CURRENT_TIMESTAMP(6),");
             out.line("  duration_ms = TIMESTAMPDIFF(MICROSECOND, __titan_started_at, CURRENT_TIMESTAMP(6)) / 1000.0");
             out.line("WHERE id = __titan_telemetry_id;");
+            out.line(restoreLastInsertIdSql());
         }
         out.line(restoreTimeZoneSql());
         out.dedent();
@@ -203,6 +213,7 @@ public final class MySqlEmitter extends AbstractSqlEmitter {
         this.routineParameters = routineSqlNameAllocator.routineParameters();
         registerRoutineTemporalAmountTypes(this.routineParameters);
         currentFunctionReturnType = returnType;
+        emittingStoredProcedure = false;
         validateMySqlRoutineBoundaryTypes(name, this.routineParameters, returnType);
         sessionTimeZoneScoped = true;
         // Functions legitimately use RETURN (including void-less early returns of the result), so
@@ -218,7 +229,7 @@ public final class MySqlEmitter extends AbstractSqlEmitter {
         out.line("BEGIN");
         out.indent();
         emitRoutineDeclarations(body, observability, returnType);
-        out.line("SET time_zone = '+00:00';");
+        emitMySqlTimeZonePin();
         if (debugLogEnabled) {
             out.line("CREATE TEMPORARY TABLE IF NOT EXISTS __debug_log(message TEXT);");
         }
@@ -236,6 +247,7 @@ public final class MySqlEmitter extends AbstractSqlEmitter {
             out.line("  status = 'success', finished_at = CURRENT_TIMESTAMP(6),");
             out.line("  duration_ms = TIMESTAMPDIFF(MICROSECOND, __titan_started_at, CURRENT_TIMESTAMP(6)) / 1000.0");
             out.line("WHERE id = __titan_telemetry_id;");
+            out.line(restoreLastInsertIdSql());
         }
         out.line(restoreTimeZoneSql());
         out.dedent();
@@ -261,6 +273,7 @@ public final class MySqlEmitter extends AbstractSqlEmitter {
         temporalAmountTypes.clear();
         resetLoopLabels();
         observabilityEnabled = false;
+        emittingStoredProcedure = false;
         staticResetKeys = collectStaticResetKeys(body);
         routineParameters = List.of();
         routineSqlNameAllocator = new RoutineSqlNameAllocator(
@@ -671,6 +684,7 @@ public final class MySqlEmitter extends AbstractSqlEmitter {
             emitMySqlTelemetryScaffoldVariables();
         }
         out.line("DECLARE " + SAVED_TIME_ZONE_VARIABLE + " VARCHAR(64) DEFAULT @@session.time_zone;");
+        out.line("DECLARE " + TIME_ZONE_PINNED_VARIABLE + " BOOLEAN DEFAULT FALSE;");
         if (functionReturnType != null && !(functionReturnType instanceof TVoidType)) {
             out.line("DECLARE " + RETURN_VALUE_VARIABLE + " " + sqlType(functionReturnType) + ";");
         }
@@ -689,6 +703,7 @@ public final class MySqlEmitter extends AbstractSqlEmitter {
 
     private void emitMySqlTelemetryScaffoldVariables() {
         out.line("DECLARE __titan_telemetry_id BIGINT DEFAULT NULL;");
+        out.line("DECLARE " + SAVED_LAST_INSERT_ID_VARIABLE + " BIGINT DEFAULT LAST_INSERT_ID();");
         out.line("DECLARE __titan_started_at TIMESTAMP(6) DEFAULT CURRENT_TIMESTAMP(6);");
         out.line("DECLARE __titan_err_state CHAR(5);");
         out.line("DECLARE __titan_err_message TEXT;");
@@ -709,6 +724,7 @@ public final class MySqlEmitter extends AbstractSqlEmitter {
         out.line("WHERE id = __titan_telemetry_id;");
         out.dedent();
         out.line("END IF;");
+        out.line(restoreLastInsertIdSql());
         out.line(restoreTimeZoneSql());
         out.line("RESIGNAL;");
         out.dedent();
@@ -746,7 +762,28 @@ public final class MySqlEmitter extends AbstractSqlEmitter {
     }
 
     private static String restoreTimeZoneSql() {
-        return "SET time_zone = " + SAVED_TIME_ZONE_VARIABLE + ";";
+        return "IF " + TIME_ZONE_PINNED_VARIABLE + " THEN SET time_zone = "
+                + SAVED_TIME_ZONE_VARIABLE + "; END IF;";
+    }
+
+    /** Restores MySQL's connection-scoped generated-id register without returning a result set. */
+    private static String restoreLastInsertIdSql() {
+        return "DO LAST_INSERT_ID(" + SAVED_LAST_INSERT_ID_VARIABLE + ");";
+    }
+
+    /**
+     * Pins a routine to UTC only when its caller has not already done so. Apart from reducing
+     * needless session writes for nested helpers, this makes the pin/restore pair idempotent:
+     * a helper entered from a UTC-scoped public procedure neither changes nor restores the
+     * connection state.
+     */
+    private void emitMySqlTimeZonePin() {
+        out.line("IF @@session.time_zone <> '+00:00' THEN");
+        out.indent();
+        out.line("SET time_zone = '+00:00';");
+        out.line("SET " + TIME_ZONE_PINNED_VARIABLE + " = TRUE;");
+        out.dedent();
+        out.line("END IF;");
     }
 
     private void emitMySqlDebugLogCleanup() {
@@ -862,6 +899,13 @@ public final class MySqlEmitter extends AbstractSqlEmitter {
     @Override
     protected String elseIfKeyword() {
         return "ELSEIF";
+    }
+
+    @Override
+    protected String emptyBranchNoOpSql() {
+        // MySQL stored-program IF arms cannot be empty. DO evaluates a side-effect-free
+        // expression and avoids creating or mutating a session variable.
+        return "DO 0;";
     }
 
     @Override
@@ -1772,8 +1816,70 @@ public final class MySqlEmitter extends AbstractSqlEmitter {
         };
     }
 
+    /**
+     * MySQL keeps the type of a user variable used by a stored procedure from that procedure's first
+     * invocation. Dynamic SQL has to bind through user variables, so assigning a raw nullable local (or
+     * assigning the same staging slot first as a different scalar kind) leaves a connection-pool resident
+     * coercion rule behind for later requests. Preserve the TIR value's declared type at the assignment
+     * boundary instead. Unknown names retain the old direct assignment for hand-built TIR fixtures; all
+     * lowered routine locals and parameters have a type in {@link RoutineSqlNameAllocator}.
+     */
+    private String typedUserVariableValue(String sourceName) {
+        String value = emittedVariableName(sourceName);
+        TirType type = routineSqlNameAllocator.variableType(sourceName);
+        if (type == null) {
+            return value;
+        }
+        return "CAST(" + value + " AS " + userVariableCastType(type) + ")";
+    }
+
+    /** Typed NULL establishes the same stable session-variable type for a dynamic SELECT INTO target. */
+    private String typedUserVariableNull(String targetName) {
+        TirType type = routineSqlNameAllocator.variableType(targetName);
+        if (type == null) {
+            return "NULL";
+        }
+        return "CAST(NULL AS " + userVariableCastType(type) + ")";
+    }
+
+    /**
+     * CAST accepts a smaller grammar than column declarations on MySQL. JSON-like values deliberately use
+     * CHAR: they cross JDBC as JSON text and MySQL's JSON operators parse that text at their typed use
+     * site, whereas a JSON CAST would reject valid nullable/serialized carrier values before the prepared
+     * statement can apply its own parameter context.
+     */
+    private String userVariableCastType(TirType type) {
+        return switch (type) {
+            case TBooleanType ignored -> "UNSIGNED";
+            case TArrayType ignored -> "CHAR";
+            case TJsonType ignored -> "CHAR";
+            case TCompositeType ignored -> "CHAR";
+            case TRecordType ignored -> "CHAR";
+            case TVoidType ignored -> throw unsupportedOnDialect(
+                    "A void value cannot be bound through a MySQL user variable");
+            default -> castTypeSql(type);
+        };
+    }
+
+    /**
+     * Renders a RawSql statement whose structure is fixed at transpile time as native stored-program SQL.
+     * A routine local is an identifier in the emitted statement, never a value interpolated into SQL text,
+     * so this preserves JDBC binding semantics without MySQL session variables or PREPARE state. Structural
+     * splice binds deliberately do not take this path: only those explicitly permissive cases still need
+     * runtime SQL assembly.
+     */
+    private String inlineStaticRawSql(RawSql node) {
+        RawSql namedParametersRewritten = new RawSql(
+                rewriteNamedParameters(node.sql(), node.parameters()),
+                node.parameters(), node.dialect(), node.arrayBinds(), node.spliceBinds());
+        return inlineCursorBinds(namedParametersRewritten);
+    }
+
     @Override
     public String visitRawSql(RawSql node) {
+        if (!node.hasSpliceBinds()) {
+            return inlineStaticRawSql(node);
+        }
         String statementName = "titan_stmt_" + (++rawSqlCounter);
         // WS-C Phase 2: a JDBC-input RawSql carries `?` positional placeholders; MySQL PREPARE keeps
         // `?` (bound by USING @p), so this rewrite is identity on MySQL — applied for symmetry with the
@@ -1798,10 +1904,9 @@ public final class MySqlEmitter extends AbstractSqlEmitter {
         List<String> userVariables = new java.util.ArrayList<>();
         List<String> assignments = new java.util.ArrayList<>();
         for (int i = 0; i < node.parameters().size(); i++) {
-            String userVar = "@titan_p" + (i + 1);
-            String parameter = emittedVariableName(node.parameters().get(i));
+            String userVar = "@titan_p" + rawSqlCounter + "_" + (i + 1);
             userVariables.add(userVar);
-            assignments.add("SET " + userVar + " = " + parameter + ";");
+            assignments.add("SET " + userVar + " = " + typedUserVariableValue(node.parameters().get(i)) + ";");
         }
 
         return source.prelude() + String.join(" ", assignments)
@@ -1836,17 +1941,20 @@ public final class MySqlEmitter extends AbstractSqlEmitter {
 
     /**
      * Native single-dialect single-row read over opaque source SQL (JDBC I-4 unparsed, WS-C Phase 2
-     * §4 step 3). MySQL has no dynamic {@code EXECUTE … INTO}, so the result columns are captured by
-     * embedding {@code INTO @titan_r1, …} inside the PREPARE text and staging through session
+     * §4 step 3). Fixed-shape source is emitted as static stored-program SQL with routine-local targets.
+     * A nested NOT FOUND handler clears those targets before the read so a no-row result cannot retain a
+     * value from an earlier invocation. Explicit structural splice binds use the deliberately permissive
+     * dynamic fallback: MySQL has no dynamic {@code EXECUTE … INTO}, so the result columns are captured by
+     * embedding statement-scoped {@code INTO @titan_r1_1, …} inside the PREPARE text and staging through session
      * variables, then copied to the routine locals after DEALLOCATE:
      *
      * <pre>
-     * SET @titan_r1 = NULL; …          -- pre-init every target (decision 4: NULL-on-no-row)
-     * SET @titan_p1 = &lt;var&gt;; …         -- stage bind values
-     * PREPARE s FROM 'SELECT … INTO @titan_r1,… FROM …';
-     * EXECUTE s USING @titan_p1, …;    -- INTO is in the text, NOT on EXECUTE
+     * SET @titan_r1_1 = NULL; …        -- pre-init every target (decision 4: NULL-on-no-row)
+     * SET @titan_p1_1 = &lt;var&gt;; …       -- stage bind values for statement 1
+     * PREPARE s FROM 'SELECT … INTO @titan_r1_1,… FROM …';
+     * EXECUTE s USING @titan_p1_1, …;  -- INTO is in the text, NOT on EXECUTE
      * DEALLOCATE PREPARE s;
-     * SET v_a = @titan_r1; …           -- copy session vars to locals
+     * SET v_a = @titan_r1_1; …         -- copy session vars to locals
      * </pre>
      *
      * <p>The {@code INTO} is injected before the first top-level {@code ' FROM '} of a <b>simple</b>
@@ -1856,7 +1964,15 @@ public final class MySqlEmitter extends AbstractSqlEmitter {
      */
     @Override
     public String visitRawReadIntoStatement(RawReadIntoStatement node) {
-        String statementName = "titan_stmt_" + (++rawSqlCounter);
+        if (!node.query().hasSpliceBinds()) {
+            List<String> localTargets = node.variableNames().stream()
+                    .map(this::emittedVariableName)
+                    .toList();
+            String body = injectIntoTargets(inlineStaticRawSql(node.query()), localTargets) + ";";
+            return staticRawReadWithNullOnNotFound(node, localTargets, body);
+        }
+        int statementOrdinal = ++rawSqlCounter;
+        String statementName = "titan_stmt_" + statementOrdinal;
         // Input hygiene: a single trailing ';' in the opaque source text would otherwise survive into
         // the PREPARE literal as an internal statement terminator. 2b normally strips it; defend here
         // too so the 2a emitter is self-contained. WS-C Phase 3 Rung 4: expand a collection-IN membership
@@ -1867,23 +1983,28 @@ public final class MySqlEmitter extends AbstractSqlEmitter {
 
         List<String> resultVars = new ArrayList<>();
         for (int i = 0; i < node.variableNames().size(); i++) {
-            resultVars.add("@titan_r" + (i + 1));
+            // MySQL user variables are connection-scoped and retain their runtime type. Reusing
+            // @titan_r1 across unrelated projections can therefore coerce a later text result
+            // through an earlier numeric slot. Scope each staging variable to its generated
+            // statement while retaining the deterministic name needed by the prepared SQL.
+            resultVars.add("@titan_r" + statementOrdinal + "_" + (i + 1));
         }
         String injectedSql = injectIntoTargets(rewrittenSql, resultVars);
 
         List<String> lines = new ArrayList<>();
         // Pre-init every result session var to NULL so an unmatched row yields NULL (decision 4).
-        for (String resultVar : resultVars) {
-            lines.add("SET " + resultVar + " = NULL;");
+        for (int i = 0; i < resultVars.size(); i++) {
+            lines.add("SET " + resultVars.get(i) + " = "
+                    + typedUserVariableNull(node.variableNames().get(i)) + ";");
         }
 
         List<String> parameters = node.query().parameters();
         List<String> userVariables = new ArrayList<>();
         if (parameters != null) {
             for (int i = 0; i < parameters.size(); i++) {
-                String userVar = "@titan_p" + (i + 1);
+                String userVar = "@titan_p" + statementOrdinal + "_" + (i + 1);
                 userVariables.add(userVar);
-                lines.add("SET " + userVar + " = " + emittedVariableName(parameters.get(i)) + ";");
+                lines.add("SET " + userVar + " = " + typedUserVariableValue(parameters.get(i)) + ";");
             }
         }
 
@@ -1892,7 +2013,7 @@ public final class MySqlEmitter extends AbstractSqlEmitter {
         // CONCAT directly — then PREPAREs from that variable; else it is the static '<sql>' literal with no
         // prelude. The INTO @r targets are already injected into injectedSql (before the FROM, ahead of any
         // splice marker).
-        DynamicSqlSource readSource = dynamicSqlSource(injectedSql, node.query(), rawSqlCounter);
+        DynamicSqlSource readSource = dynamicSqlSource(injectedSql, node.query(), statementOrdinal);
         if (!readSource.prelude().isBlank()) {
             lines.add(readSource.prelude().strip());
         }
@@ -1908,7 +2029,32 @@ public final class MySqlEmitter extends AbstractSqlEmitter {
         for (int i = 0; i < node.variableNames().size(); i++) {
             lines.add("SET " + emittedVariableName(node.variableNames().get(i)) + " = " + resultVars.get(i) + ";");
         }
-        String body = String.join("\n", lines);
+        return rawReadNotFoundGuard(node, String.join("\n", lines));
+    }
+
+    /**
+     * A local SELECT ... INTO leaves its previous local values intact when it finds no row. The old
+     * prepared-statement path explicitly reset its user-variable targets first, so preserve that
+     * NULL-on-no-row contract for the static path. The handler consumes MySQL's NOT FOUND condition
+     * when the caller does not request an explicit not-found raise; when it does, the shared guard
+     * records the condition and performs the requested raise after the read.
+     */
+    private String staticRawReadWithNullOnNotFound(
+            RawReadIntoStatement node, List<String> localTargets, String readSql) {
+        String resets = localTargets.stream()
+                .map(target -> "SET " + target + " = NULL;")
+                .collect(Collectors.joining("\n"));
+        String body = resets + "\n" + readSql;
+        if (node.notFoundRaise() != null) {
+            return rawReadNotFoundGuard(node, body);
+        }
+        return "BEGIN\n"
+                + "    DECLARE CONTINUE HANDLER FOR NOT FOUND BEGIN END;\n"
+                + indentMultiline(body) + "\n"
+                + "END;";
+    }
+
+    private String rawReadNotFoundGuard(RawReadIntoStatement node, String body) {
         if (node.notFoundRaise() == null) {
             return body;
         }
@@ -2140,13 +2286,10 @@ public final class MySqlEmitter extends AbstractSqlEmitter {
 
     /**
      * Native single-dialect multi-row read over <b>constant</b> source SQL (JDBC I-5 unparsed, WS-C
-     * Phase 2 §4 step 3, decision 1). MySQL static cursors cannot iterate runtime-built text, so the
-     * constant SQL is inlined directly into a static {@code DECLARE <cur> CURSOR FOR <text>}, reusing
-     * the cursor safety scaffold copied from {@link #visitForCursorStatement} (done flag, open flag,
-     * EXIT HANDLER FOR SQLEXCEPTION that closes-if-open and RESIGNALs, CONTINUE HANDLER FOR NOT FOUND,
-     * labeled LOOP with {@code FETCH … INTO <vars>} and {@code IF done LEAVE}). The {@code ?}
-     * placeholders in the cursor text are rewritten to the bound routine-local <b>names</b> spliced
-     * as identifier references (a typed column/local reference, never a value — injection-safe).
+     * Phase 2 §4 step 3, decision 1). Fixed-shape reads retain MySQL's static cursor: it binds directly
+     * to typed routine locals and creates no connection-scoped dynamic-SQL state. A procedure uses the
+     * temporary-table fallback only for an explicit structural splice, which a static cursor cannot
+     * represent; functions reject that form because MySQL forbids {@code PREPARE} there.
      */
     @Override
     public String visitRawCursorStatement(RawCursorStatement node) {
@@ -2156,9 +2299,6 @@ public final class MySqlEmitter extends AbstractSqlEmitter {
         String base = sanitizeIdentifier(node.variableNames().isEmpty()
                 ? "row"
                 : emittedVariableName(node.variableNames().getFirst()));
-        String cursorName = routineSqlNameAllocator.allocateGeneratedName("cur_" + base);
-        String doneFlag = routineSqlNameAllocator.allocateGeneratedName("done_" + base);
-        String cursorOpenFlag = routineSqlNameAllocator.allocateGeneratedName("cursor_open_" + base);
         String loopLabel = pushLoopLabel((node.label() == null || node.label().isBlank())
                 ? routineSqlNameAllocator.allocateGeneratedName("read_" + base)
                 : node.label());
@@ -2194,6 +2334,14 @@ public final class MySqlEmitter extends AbstractSqlEmitter {
             popLoopLabel();
         }
 
+        if (emittingStoredProcedure && node.query().hasSpliceBinds()) {
+            return materializedRawCursorLoop(
+                    node, fetchTargets, base, loopLabel, hoistedTargetDeclares.toString(), bodySql);
+        }
+
+        String cursorName = routineSqlNameAllocator.allocateGeneratedName("cur_" + base);
+        String doneFlag = routineSqlNameAllocator.allocateGeneratedName("done_" + base);
+        String cursorOpenFlag = routineSqlNameAllocator.allocateGeneratedName("cursor_open_" + base);
         String cursorText = inlineCursorBinds(node.query());
 
         return "BEGIN\n"
@@ -2216,6 +2364,73 @@ public final class MySqlEmitter extends AbstractSqlEmitter {
                 + "    END LOOP " + loopLabel + ";\n"
                 + "    CLOSE " + cursorName + ";\n"
                 + "    SET " + cursorOpenFlag + " = FALSE;\n"
+                + "END;";
+    }
+
+    /**
+     * Procedure-only cursor lowering. The synthetic AUTO_INCREMENT ordinal is consumed before the
+     * original typed targets, so the lowered loop body stays unchanged while each row is read with a
+     * bounded primary-key {@code SELECT ... INTO}, rather than MySQL's stateful FETCH mechanism.
+     */
+    private String materializedRawCursorLoop(
+            RawCursorStatement node,
+            String fetchTargets,
+            String base,
+            String loopLabel,
+            String hoistedTargetDeclares,
+            String bodySql
+    ) {
+        int statementOrdinal = ++rawSqlCounter;
+        String temporaryTable = routineSqlNameAllocator.allocateGeneratedName("titan_cursor_rows_" + base);
+        String ordinalColumn = routineSqlNameAllocator.allocateGeneratedName("titan_cursor_ordinal_" + base);
+        String ordinalValue = routineSqlNameAllocator.allocateGeneratedName("cursor_ordinal_" + base);
+        String rowCount = routineSqlNameAllocator.allocateGeneratedName("cursor_row_count_" + base);
+        String materializedOrdinal = routineSqlNameAllocator.allocateGeneratedName("cursor_row_id_" + base);
+        String statementName = "titan_cursor_stmt_" + statementOrdinal;
+        String sourceQuery = stripTrailingSemicolon(expandArrayBindMarkers(node.query()));
+        String materializationQuery = "CREATE TEMPORARY TABLE " + temporaryTable + " ("
+                + ordinalColumn + " BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY) AS " + sourceQuery;
+        DynamicSqlSource materializationSource = dynamicSqlSource(
+                materializationQuery, node.query(), statementOrdinal);
+        List<String> parameters = node.query().parameters() == null ? List.of() : node.query().parameters();
+        List<String> parameterVariables = new ArrayList<>();
+        List<String> setupLines = new ArrayList<>();
+        setupLines.add("DROP TEMPORARY TABLE IF EXISTS " + temporaryTable + ";");
+        for (int i = 0; i < parameters.size(); i++) {
+            String parameterVariable = "@titan_cursor_p" + statementOrdinal + "_" + (i + 1);
+            parameterVariables.add(parameterVariable);
+            setupLines.add("SET " + parameterVariable + " = "
+                    + typedUserVariableValue(parameters.get(i)) + ";");
+        }
+        if (!materializationSource.prelude().isBlank()) {
+            setupLines.add(materializationSource.prelude().strip());
+        }
+        setupLines.add("PREPARE " + statementName + " FROM " + materializationSource.fromToken() + ";");
+        setupLines.add(parameterVariables.isEmpty()
+                ? "EXECUTE " + statementName + ";"
+                : "EXECUTE " + statementName + " USING " + String.join(", ", parameterVariables) + ";");
+        setupLines.add("DEALLOCATE PREPARE " + statementName + ";");
+
+        String rowTargets = materializedOrdinal + (fetchTargets.isBlank() ? "" : ", " + fetchTargets);
+        return "BEGIN\n"
+                + "    DECLARE " + ordinalValue + " BIGINT DEFAULT 1;\n"
+                + "    DECLARE " + rowCount + " BIGINT DEFAULT 0;\n"
+                + "    DECLARE " + materializedOrdinal + " BIGINT;\n"
+                + hoistedTargetDeclares
+                + "    DECLARE EXIT HANDLER FOR SQLEXCEPTION\n"
+                + "    BEGIN\n"
+                + "        DROP TEMPORARY TABLE IF EXISTS " + temporaryTable + ";\n"
+                + "        RESIGNAL;\n"
+                + "    END;\n"
+                + indentMultiline(String.join("\n", setupLines)) + "\n"
+                + "    SELECT COUNT(*) INTO " + rowCount + " FROM " + temporaryTable + ";\n"
+                + "    " + loopLabel + ": WHILE " + ordinalValue + " <= " + rowCount + " DO\n"
+                + "        SELECT * INTO " + rowTargets + " FROM " + temporaryTable
+                + " WHERE " + ordinalColumn + " = " + ordinalValue + ";\n"
+                + bodySql + "\n"
+                + "        SET " + ordinalValue + " = " + ordinalValue + " + 1;\n"
+                + "    END WHILE " + loopLabel + ";\n"
+                + "    DROP TEMPORARY TABLE IF EXISTS " + temporaryTable + ";\n"
                 + "END;";
     }
 
@@ -2396,6 +2611,13 @@ public final class MySqlEmitter extends AbstractSqlEmitter {
                     + node.arguments().get(1).accept(this) + ")";
         }
 
+        if ("__titan_str_equals".equals(node.name()) && node.arguments().size() == 2) {
+            // BINARY comparison bypasses the connection/database collation so this retains
+            // Java String.equals case-sensitive semantics on the usual *_ci MySQL defaults.
+            return "(BINARY " + node.arguments().get(0).accept(this) + " = BINARY "
+                    + node.arguments().get(1).accept(this) + ")";
+        }
+
         if ("__titan_str_concat".equals(node.name()) && node.arguments().size() == 2) {
             // B-10 (TG-BLK-012): coerceToTextSql renders a boolean operand as 'true'/'false'
             // (a CASE) rather than the TINYINT '1'/'0' a bare CAST AS CHAR would produce, matching
@@ -2407,6 +2629,25 @@ public final class MySqlEmitter extends AbstractSqlEmitter {
 
         if ("__titan_char_code".equals(node.name()) && node.arguments().size() == 1) {
             return "ASCII(" + node.arguments().get(0).accept(this) + ")";
+        }
+
+        if ("__titan_text_base64url_encode_utf8".equals(node.name()) && node.arguments().size() == 1) {
+            String value = node.arguments().getFirst().accept(this);
+            return "REPLACE(REPLACE(REPLACE(REPLACE(TO_BASE64(CONVERT(" + value
+                    + " USING utf8mb4)), '=', ''), '+', '-'), '/', '_'), CHAR(10), '')";
+        }
+
+        if ("__titan_text_base64url_decode_utf8".equals(node.name()) && node.arguments().size() == 1) {
+            String value = node.arguments().getFirst().accept(this);
+            return "CONVERT(FROM_BASE64(CONCAT(REPLACE(REPLACE(" + value
+                    + ", '-', '+'), '_', '/'), REPEAT('=', MOD(4 - MOD(CHAR_LENGTH(" + value
+                    + "), 4), 4)))) USING utf8mb4)";
+        }
+
+        if ("__titan_text_base64url_alphabet_index".equals(node.name()) && node.arguments().size() == 1) {
+            String value = node.arguments().getFirst().accept(this);
+            return "(LOCATE(BINARY " + value
+                    + ", BINARY 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_') - 1)";
         }
 
         if ("__titan_str_index_of".equals(node.name()) && node.arguments().size() == 2) {
@@ -2536,6 +2777,10 @@ public final class MySqlEmitter extends AbstractSqlEmitter {
         }
         if ("__titan_time_instant_now".equals(node.name()) && node.arguments().isEmpty()) {
             return "UTC_TIMESTAMP()";
+        }
+        if ("__titan_time_instant_of_epoch_millis".equals(node.name()) && node.arguments().size() == 1) {
+            return "TIMESTAMPADD(MICROSECOND, (" + node.arguments().get(0).accept(this)
+                    + " * 1000), '1970-01-01 00:00:00')";
         }
         if ("__titan_time_zoneddatetime_now".equals(node.name()) && node.arguments().isEmpty()) {
             return "CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', @@session.time_zone)";
@@ -2855,6 +3100,7 @@ public final class MySqlEmitter extends AbstractSqlEmitter {
             case TBooleanType ignored -> "BOOLEAN";
             case TTextType ignored -> "TEXT";
             case TNumericType t -> "DECIMAL(" + t.precision() + "," + t.scale() + ")";
+            case TDoubleType ignored -> "DOUBLE";
             case TDateType ignored -> "DATE";
             case TTimeType ignored -> "TIME";
             // E-13 (plan 3.1): (6) preserves Java's microsecond precision (bare DATETIME/

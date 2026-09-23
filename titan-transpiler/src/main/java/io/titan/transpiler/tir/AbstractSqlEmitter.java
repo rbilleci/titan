@@ -5,6 +5,8 @@ import io.titan.transpiler.diagnostics.TitanDiagnostic;
 import io.titan.transpiler.diagnostics.TitanDiagnosticException;
 import io.titan.transpiler.diagnostics.TitanErrorCode;
 import io.titan.transpiler.emit.CodeBuffer;
+import java.nio.file.InvalidPathException;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -89,6 +91,9 @@ public abstract class AbstractSqlEmitter implements TirVisitor<String>, Artifact
 
     /** Keyword opening an else-if branch: {@code ELSIF} in PL/pgSQL, {@code ELSEIF} in MySQL. */
     protected abstract String elseIfKeyword();
+
+    /** A dialect-valid statement for a syntactically empty Java control-flow branch. */
+    protected abstract String emptyBranchNoOpSql();
 
     /** Renders a character literal: PostgreSQL quotes it, MySQL uses {@code CHAR(n USING utf8mb4)}. */
     protected abstract String characterLiteral(char value);
@@ -556,7 +561,7 @@ public abstract class AbstractSqlEmitter implements TirVisitor<String>, Artifact
         StringBuilder sql = new StringBuilder("IF ")
                 .append(node.condition().accept(this))
                 .append(" THEN\n")
-                .append(indentMultiline(blockBody(node.thenBlock())));
+                .append(indentMultiline(nonEmptyBranchBody(node.thenBlock())));
 
         for (ElseIfClause elseIf : node.elseIfClauses()) {
             sql.append('\n')
@@ -564,16 +569,22 @@ public abstract class AbstractSqlEmitter implements TirVisitor<String>, Artifact
                     .append(' ')
                     .append(elseIf.condition().accept(this))
                     .append(" THEN\n")
-                    .append(indentMultiline(blockBody(elseIf.block())));
+                    .append(indentMultiline(nonEmptyBranchBody(elseIf.block())));
         }
 
         if (node.elseBlock() != null) {
             sql.append("\nELSE\n")
-                    .append(indentMultiline(blockBody(node.elseBlock())));
+                    .append(indentMultiline(nonEmptyBranchBody(node.elseBlock())));
         }
 
         sql.append("\nEND IF;");
         return sql.toString();
+    }
+
+    /** MySQL and PL/pgSQL require a statement in every emitted IF/ELSIF/ELSE arm. */
+    private String nonEmptyBranchBody(Block block) {
+        String body = blockBody(block);
+        return body == null || body.isBlank() ? emptyBranchNoOpSql() : body;
     }
 
     @Override
@@ -616,7 +627,11 @@ public abstract class AbstractSqlEmitter implements TirVisitor<String>, Artifact
 
     @Override
     public String visitNullGuardStatement(NullGuardStatement node) {
-        String location = node.sourceLocation() == null ? "unknown" : node.sourceLocation();
+        // Source locations originate in javac and are normally absolute paths.  SQL packages are
+        // distributable artifacts, so neither their provenance comments nor their runtime error
+        // text may disclose the build machine's user name or filesystem layout.  Canonicalize once
+        // here because both renderings below include the location.
+        String location = publicSourceLocation(node.sourceLocation());
         String sourceComment = sourceCommentForLocation(location);
         String guardSql = "IF " + emittedVariableName(node.variableName()) + " IS NULL THEN "
                 + nullPointerSignalSql(location) + " END IF;";
@@ -1418,6 +1433,99 @@ public abstract class AbstractSqlEmitter implements TirVisitor<String>, Artifact
 
     private static boolean isIdentifierPart(char c) {
         return Character.isLetterOrDigit(c) || c == '_';
+    }
+
+    /**
+     * Converts a compiler source location into provenance safe to publish in a generated SQL
+     * artifact.  A path below the build working directory remains project-relative; an absolute
+     * path outside it is reduced to its file name.  Relative paths remain useful, but traversal
+     * paths are likewise reduced so the artifact cannot reveal its caller's directory structure.
+     */
+    private static String publicSourceLocation(String sourceLocation) {
+        if (sourceLocation == null || sourceLocation.isBlank()) {
+            return "unknown";
+        }
+
+        int split = sourceLocation.lastIndexOf(':');
+        if (split <= 0 || split == sourceLocation.length() - 1) {
+            return "unknown";
+        }
+
+        String linePart = sourceLocation.substring(split + 1);
+        int sourceLine;
+        try {
+            sourceLine = Integer.parseInt(linePart);
+        } catch (NumberFormatException ignored) {
+            return "unknown";
+        }
+        if (sourceLine <= 0) {
+            return "unknown";
+        }
+
+        String sourceFile = sourceLocation.substring(0, split);
+        return publicSourcePath(sourceFile) + ":" + sourceLine;
+    }
+
+    private static String publicSourcePath(String sourceFile) {
+        String normalizedSeparators = sourceFile.replace('\\', '/');
+        if (normalizedSeparators.isBlank()) {
+            return "unknown";
+        }
+
+        // A package is normally emitted on the same platform that compiled its sources.  This
+        // branch also prevents a Windows absolute location from leaking if it is inspected on a
+        // non-Windows host.
+        if (isWindowsAbsolutePath(normalizedSeparators)) {
+            return fileName(normalizedSeparators);
+        }
+
+        try {
+            Path path = Path.of(sourceFile).normalize();
+            if (path.isAbsolute()) {
+                Path workingDirectory = Path.of("").toAbsolutePath().normalize();
+                if (path.startsWith(workingDirectory)) {
+                    return artifactPath(workingDirectory.relativize(path));
+                }
+                return fileName(path.toString());
+            }
+            if (path.startsWith("..")) {
+                return fileName(path.toString());
+            }
+            return artifactPath(path);
+        } catch (InvalidPathException ignored) {
+            return fileName(normalizedSeparators);
+        }
+    }
+
+    private static boolean isWindowsAbsolutePath(String path) {
+        return path.startsWith("//")
+                || (path.length() >= 3
+                        && Character.isLetter(path.charAt(0))
+                        && path.charAt(1) == ':'
+                        && path.charAt(2) == '/');
+    }
+
+    private static String artifactPath(Path path) {
+        String result = path.toString().replace('\\', '/');
+        return result.isBlank() || ".".equals(result) ? "unknown" : removeControlCharacters(result);
+    }
+
+    private static String fileName(String path) {
+        int separator = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
+        String result = separator < 0 ? path : path.substring(separator + 1);
+        result = removeControlCharacters(result);
+        return result.isBlank() ? "unknown" : result;
+    }
+
+    private static String removeControlCharacters(String value) {
+        StringBuilder result = new StringBuilder(value.length());
+        for (int index = 0; index < value.length(); index++) {
+            char character = value.charAt(index);
+            if (character >= 0x20 && character != 0x7f) {
+                result.append(character);
+            }
+        }
+        return result.toString();
     }
 
     private String sourceCommentForLocation(String sourceLocation) {

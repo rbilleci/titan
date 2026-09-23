@@ -593,6 +593,12 @@ public final class PostgreSqlEmitter extends AbstractSqlEmitter {
     }
 
     @Override
+    protected String emptyBranchNoOpSql() {
+        // NULL is PL/pgSQL's statement-level no-op and is valid in every IF arm.
+        return "NULL;";
+    }
+
+    @Override
     protected String truncateTowardZeroSql(String operandSql) {
         return "TRUNC(" + operandSql + ")";
     }
@@ -1373,6 +1379,13 @@ public final class PostgreSqlEmitter extends AbstractSqlEmitter {
                     + node.arguments().get(1).accept(this) + ")";
         }
 
+        if ("__titan_str_equals".equals(node.name()) && node.arguments().size() == 2) {
+            // Text equality must not inherit an ICU/database collation: Java String.equals is
+            // exact.  UTF-8 byte comparison preserves valid Java string code-point sequences.
+            return "(CONVERT_TO(" + node.arguments().get(0).accept(this) + ", 'UTF8') = CONVERT_TO("
+                    + node.arguments().get(1).accept(this) + ", 'UTF8'))";
+        }
+
         if ("__titan_str_concat".equals(node.name()) && node.arguments().size() == 2) {
             // B-10 (TG-BLK-012): route operands through the shared text coercion. PostgreSQL's
             // boolean::text already renders 'true'/'false', so booleanToTextSql keeps the plain
@@ -1384,6 +1397,28 @@ public final class PostgreSqlEmitter extends AbstractSqlEmitter {
 
         if ("__titan_char_code".equals(node.name()) && node.arguments().size() == 1) {
             return "ASCII(" + node.arguments().get(0).accept(this) + ")";
+        }
+
+        if ("__titan_text_base64url_encode_utf8".equals(node.name()) && node.arguments().size() == 1) {
+            String value = node.arguments().getFirst().accept(this);
+            return "TRANSLATE(RTRIM(ENCODE(CONVERT_TO(" + value
+                    + ", 'UTF8'), 'base64'), '='), '+/', '-_')";
+        }
+
+        if ("__titan_text_base64url_decode_utf8".equals(node.name()) && node.arguments().size() == 1) {
+            String value = node.arguments().getFirst().accept(this);
+            return "CONVERT_FROM(DECODE(TRANSLATE(" + value
+                    + ", '-_', '+/') || REPEAT('=', (4 - (CHAR_LENGTH(" + value
+                    + ") % 4)) % 4), 'base64'), 'UTF8')";
+        }
+
+        if ("__titan_text_base64url_alphabet_index".equals(node.name()) && node.arguments().size() == 1) {
+            String value = node.arguments().getFirst().accept(this);
+            // The alphabet and accepted values are ASCII, so bytea POSITION both guarantees a
+            // case-exact result and retains the Java index for every accepted character.  Text
+            // STRPOS can otherwise inherit a nondeterministic ICU collation.
+            return "(POSITION(CONVERT_TO(" + value + ", 'UTF8') IN CONVERT_TO("
+                    + "'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_', 'UTF8')) - 1)";
         }
 
         if ("__titan_str_index_of".equals(node.name()) && node.arguments().size() == 2) {
@@ -1506,7 +1541,13 @@ public final class PostgreSqlEmitter extends AbstractSqlEmitter {
             return "CURRENT_TIMESTAMP";
         }
         if ("__titan_time_instant_now".equals(node.name()) && node.arguments().isEmpty()) {
-            return "CURRENT_TIMESTAMP";
+            // CURRENT_TIMESTAMP is fixed at PostgreSQL transaction start. Instant.now() must
+            // observe the database wall clock, including when a transaction has spent time in
+            // earlier generated work before evaluating this expression.
+            return "CLOCK_TIMESTAMP()";
+        }
+        if ("__titan_time_instant_of_epoch_millis".equals(node.name()) && node.arguments().size() == 1) {
+            return "TO_TIMESTAMP((" + node.arguments().get(0).accept(this) + ") / 1000.0)";
         }
         if ("__titan_time_zoneddatetime_now".equals(node.name()) && node.arguments().isEmpty()) {
             return "CURRENT_TIMESTAMP";
@@ -1662,6 +1703,7 @@ public final class PostgreSqlEmitter extends AbstractSqlEmitter {
             case TBooleanType ignored -> "BOOLEAN";
             case TTextType ignored -> "TEXT";
             case TNumericType t -> "NUMERIC(" + t.precision() + "," + t.scale() + ")";
+            case TDoubleType ignored -> "DOUBLE PRECISION";
             case TDateType ignored -> "DATE";
             case TTimeType ignored -> "TIME";
             case TTimestampType ignored -> "TIMESTAMP";

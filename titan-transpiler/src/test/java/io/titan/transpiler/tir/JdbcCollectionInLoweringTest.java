@@ -141,10 +141,8 @@ class JdbcCollectionInLoweringTest {
     @Test
     void emitsJsonTableArrayBindOnMysql() throws Exception {
         String sql = transpile("FlagByIds", FLAG_BY_IDS, "mysql");
-        // The membership is emitted inside a PREPARE '...' literal, so its own single quotes are doubled
-        // ('$[*]' -> ''$[*]''). Assert the structure (JSON_TABLE over the bound `?`, BIGINT column cast).
-        assertTrue(sql.contains("JSON_TABLE(?, ''$[*]'' COLUMNS (v BIGINT PATH ''$''))"),
-                "MySQL must bind the whole list as one JSON-array via JSON_TABLE(?); was:\n" + sql);
+        assertTrue(sql.contains("JSON_TABLE(p_ids, '$[*]' COLUMNS (v BIGINT PATH '$'))"),
+                "MySQL must use the typed routine parameter as one JSON array; was:\n" + sql);
         assertTrue(sql.contains("id IN (SELECT v FROM JSON_TABLE("),
                 "MySQL must keep the membership as IN (SELECT v FROM JSON_TABLE(...)); was:\n" + sql);
         // The list parameter is a JSON column (TArrayType maps to JSON on MySQL).
@@ -191,7 +189,7 @@ class JdbcCollectionInLoweringTest {
     @Test
     void helperFormTranspilesEndToEndOnMysql() throws Exception {
         String sql = transpile("FlagByIdsHelper", FLAG_BY_IDS_HELPER, "mysql");
-        assertTrue(sql.contains("JSON_TABLE(?, ''$[*]'' COLUMNS (v BIGINT PATH ''$''))"),
+        assertTrue(sql.contains("JSON_TABLE(p_ids, '$[*]' COLUMNS (v BIGINT PATH '$'))"),
                 "the helper form must lower to the JSON_TABLE membership on MySQL; was:\n" + sql);
         assertFalse(sql.toLowerCase(java.util.Locale.ROOT).contains("placeholders"),
                 "the array-bound helper must not be transpiled as a routine; was:\n" + sql);
@@ -241,7 +239,7 @@ class JdbcCollectionInLoweringTest {
         // column type), NOT the CAST-target keyword SIGNED (ERROR 1064 at CALL). Cf. correctness/deploy
         // criticals.
         String sql = transpile("FlagByIntIds", FLAG_BY_INT_IDS, "mysql");
-        assertTrue(sql.contains("COLUMNS (v INT PATH ''$'')"),
+        assertTrue(sql.contains("COLUMNS (v INT PATH '$')"),
                 "List<Integer> must extract via a valid INT column type; was:\n" + sql);
         assertFalse(sql.contains("COLUMNS (v SIGNED"),
                 "SIGNED is a CAST keyword, invalid in a JSON_TABLE COLUMNS slot; was:\n" + sql);
@@ -253,7 +251,7 @@ class JdbcCollectionInLoweringTest {
         // NULL), NOT CHAR(1000) (ERROR 1074: exceeds the 255-char COLUMNS cap). Cf. correctness/deploy
         // criticals + the truncation finding (LONGTEXT keeps PG text[] row-equivalence for long elements).
         String sql = transpile("FlagByStrCodes", FLAG_BY_STR_CODES, "mysql");
-        assertTrue(sql.contains("COLUMNS (v LONGTEXT PATH ''$'')"),
+        assertTrue(sql.contains("COLUMNS (v LONGTEXT PATH '$')"),
                 "List<String> must extract via LONGTEXT (truncation-free); was:\n" + sql);
         // The membership's extracted column must not be a CHAR(...) (the 255-char cap; CHAR(1000) is
         // ERROR 1074). Check only the `v <type>` COLUMNS slot — an unrelated VARCHAR(64) elsewhere (the
@@ -304,9 +302,11 @@ class JdbcCollectionInLoweringTest {
         // membership form + a single bound `?`/`$1` appears.
         String pg = transpile("FlagByIds", FLAG_BY_IDS, "postgresql");
         String mysql = transpile("FlagByIds", FLAG_BY_IDS, "mysql");
-        // Exactly one bound placeholder for the collection on each dialect (no per-element run).
+        // Exactly one typed collection value reaches each static statement (no per-element run).
         assertTrue(pg.contains("USING p_ids"), "PG binds the whole list param via USING; was:\n" + pg);
-        assertTrue(mysql.contains("SET @titan_p1 = p_ids"),
-                "MySQL binds the whole list param via @p; was:\n" + mysql);
+        assertTrue(mysql.contains("JSON_TABLE(p_ids, '$[*]'"),
+                "MySQL uses the typed JSON routine parameter directly; was:\n" + mysql);
+        assertFalse(mysql.contains("PREPARE") || mysql.contains("@titan_p"),
+                "static collection SQL must not require dynamic SQL or session variables; was:\n" + mysql);
     }
 }

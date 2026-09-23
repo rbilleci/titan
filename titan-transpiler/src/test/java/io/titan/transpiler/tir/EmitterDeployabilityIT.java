@@ -1565,10 +1565,8 @@ class EmitterDeployabilityIT {
         String sql = "SELECT " + SCHEMA + ".cast_chain(?, ?)";
         try (PreparedStatement statement = connection.prepareStatement(sql)) {
             statement.setInt(1, small);
-            // The double parameter maps to NUMERIC(38,10); PostgreSQL resolves function
-            // overloads without an implicit double-precision->numeric conversion, so bind as
-            // BigDecimal (numeric) directly.
-            statement.setBigDecimal(2, java.math.BigDecimal.valueOf(ratio));
+            // Java double maps directly to PostgreSQL DOUBLE PRECISION.
+            statement.setDouble(2, ratio);
             try (var resultSet = statement.executeQuery()) {
                 assertTrue(resultSet.next(), "cast_chain returned no rows");
                 return resultSet.getLong(1);

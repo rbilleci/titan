@@ -135,8 +135,7 @@ class JdbcUuidLoweringTest {
     @Test
     void uuidListEmitsCharThirtySixJsonTableOnMysql() throws Exception {
         String sql = transpile("FlagByExtIdList", FLAG_BY_EXT_ID_LIST, "mysql");
-        // The membership is emitted inside a PREPARE '...' literal, so single quotes are doubled.
-        assertTrue(sql.contains("JSON_TABLE(?, ''$[*]'' COLUMNS (v CHAR(36) PATH ''$''))"),
+        assertTrue(sql.contains("JSON_TABLE(p_ext_ids, '$[*]' COLUMNS (v CHAR(36) PATH '$'))"),
                 "MySQL must extract UUID elements as CHAR(36) from the bound JSON array; was:\n" + sql);
         assertTrue(sql.contains("ext_id IN (SELECT v FROM JSON_TABLE("),
                 "MySQL must keep the membership as IN (SELECT v FROM JSON_TABLE(...)); was:\n" + sql);

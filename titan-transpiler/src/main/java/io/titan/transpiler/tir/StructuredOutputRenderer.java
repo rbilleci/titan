@@ -82,6 +82,7 @@ public final class StructuredOutputRenderer {
             case TTextType ignored -> "TEXT";
             case TBooleanType ignored -> "BOOLEAN";
             case TNumericType ignored -> "NUMERIC";
+            case TDoubleType ignored -> "DOUBLE PRECISION";
             case TDateType ignored -> "DATE";
             case TTimeType ignored -> "TIME";
             case TTimestampType ignored -> "TIMESTAMP";
@@ -98,6 +99,7 @@ public final class StructuredOutputRenderer {
             case TTextType ignored -> "CHAR";
             case TBooleanType ignored -> "SIGNED";
             case TNumericType ignored -> "DECIMAL";
+            case TDoubleType ignored -> "DOUBLE";
             case TDateType ignored -> "DATE";
             case TTimeType ignored -> "TIME";
             case TTimestampType ignored -> "DATETIME";

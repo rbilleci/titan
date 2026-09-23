@@ -18,6 +18,49 @@ class TranspilationPipelineRawSqlTest {
     Path tempDir;
 
     @Test
+    void emitsDialectValidNoOpsForEmptyIfElseIfAndElseBranches() throws Exception {
+        Path source = tempDir.resolve("EmptyIfBranchDemo.java");
+        Files.writeString(source, """
+                import titan.dsl.StoredProcedure;
+
+                class EmptyIfBranchDemo {
+                    @StoredProcedure
+                    static void run(boolean enabled) {
+                        if (enabled) {
+                        } else if (!enabled) {
+                        } else {
+                        }
+                    }
+                }
+                """);
+
+        List<TranspilationPipeline.GeneratedSql> generated = new TranspilationPipeline().transpile(
+                List.of(source),
+                List.of(),
+                List.of("postgresql", "mysql"),
+                List.of("app"),
+                true);
+
+        String postgresSql = generated.stream()
+                .filter(sql -> sql.target().equals("postgresql") && sql.methodName().equals("run"))
+                .findFirst()
+                .orElseThrow()
+                .sql();
+        String mysqlSql = generated.stream()
+                .filter(sql -> sql.target().equals("mysql") && sql.methodName().equals("run"))
+                .findFirst()
+                .orElseThrow()
+                .sql();
+
+        assertTrue(postgresSql.contains("THEN\n        NULL;"), postgresSql);
+        assertTrue(postgresSql.contains("ELSIF "), postgresSql);
+        assertTrue(postgresSql.contains("ELSE\n        NULL;"), postgresSql);
+        assertTrue(mysqlSql.contains("THEN\n        DO 0;"), mysqlSql);
+        assertTrue(mysqlSql.contains("ELSEIF "), mysqlSql);
+        assertTrue(mysqlSql.contains("ELSE\n        DO 0;"), mysqlSql);
+    }
+
+    @Test
     void emitsSqlNullComparisonsForJavaNullEquality() throws Exception {
         Path source = tempDir.resolve("NullComparisonFunction.java");
         Files.writeString(source, """
@@ -138,9 +181,8 @@ class TranspilationPipelineRawSqlTest {
         assertTrue(postgresSql.contains("EXECUTE 'SELECT * FROM accounts WHERE id = $1' USING p_account_id;"));
         assertTrue(!postgresSql.contains("UPDATE accounts SET status"));
 
-        assertTrue(mysqlSql.contains("SET @titan_p1 = p_status;"));
-        assertTrue(mysqlSql.contains("SET @titan_p2 = p_account_id;"));
-        assertTrue(mysqlSql.contains("PREPARE titan_stmt_1 FROM 'UPDATE accounts SET status = ? WHERE id = ?';"));
+        assertTrue(mysqlSql.contains("UPDATE accounts SET status = p_status WHERE id = p_account_id;"));
+        assertTrue(!mysqlSql.contains("PREPARE") && !mysqlSql.contains("@titan_p"));
         assertTrue(!mysqlSql.contains("SELECT * FROM accounts WHERE id = $1"));
     }
 
@@ -186,13 +228,12 @@ class TranspilationPipelineRawSqlTest {
         assertTrue(!postgresSql.contains("'$1' AS literal_value"));
         assertTrue(postgresSql.contains("-- :accountId should not be rewritten in comments"));
 
-        assertTrue(mysqlSql.contains("SET @titan_p1 = p_status;"));
-        assertTrue(mysqlSql.contains("SET @titan_p2 = p_account_id;"));
-        assertTrue(mysqlSql.contains("SET status = ?,"));
+        assertTrue(mysqlSql.contains("SET status = p_status,"));
         assertTrue(mysqlSql.contains(":status"));
-        assertTrue(!mysqlSql.contains("note = '?'"));
-        assertTrue(mysqlSql.contains("WHERE id = ?"));
+        assertTrue(!mysqlSql.contains("note = 'p_status'"));
+        assertTrue(mysqlSql.contains("WHERE id = p_account_id"));
         assertTrue(mysqlSql.contains("/* :status in comments must stay untouched */"));
+        assertTrue(!mysqlSql.contains("PREPARE") && !mysqlSql.contains("@titan_p"));
     }
 
     @Test
@@ -254,9 +295,9 @@ class TranspilationPipelineRawSqlTest {
 
         assertTrue(mysqlFunctionSql.contains("CREATE FUNCTION `app`.`sum`(p_user_id INT, p_user_id_2 INT)"));
         assertTrue(mysqlFunctionSql.contains("SET __titan_return_value = (p_user_id + p_user_id_2);"));
-        assertTrue(mysqlRawSql.contains("SET @titan_p1 = p_user_id;"));
-        assertTrue(mysqlRawSql.contains("SET @titan_p2 = p_user_id_2;"));
-        assertTrue(mysqlRawSql.contains("PREPARE titan_stmt_1 FROM 'UPDATE accounts SET owner_id = ? WHERE reviewer_id = ?';"));
+        assertTrue(mysqlRawSql.contains(
+                "UPDATE accounts SET owner_id = p_user_id WHERE reviewer_id = p_user_id_2;"));
+        assertTrue(!mysqlRawSql.contains("PREPARE") && !mysqlRawSql.contains("@titan_p"));
     }
 
     @Test
@@ -1204,7 +1245,7 @@ class TranspilationPipelineRawSqlTest {
         assertTrue(postgresSql.contains("v_earlier := (v_now - (2 * INTERVAL '1 hour'));"));
         assertTrue(postgresSql.contains("v_just_date := DATE(v_now);"));
         assertTrue(postgresSql.contains("v_just_time := CAST(v_now AS TIME);"));
-        assertTrue(postgresSql.contains("v_instant_now := CURRENT_TIMESTAMP;"));
+        assertTrue(postgresSql.contains("v_instant_now := CLOCK_TIMESTAMP();"));
         assertTrue(postgresSql.contains("v_zoned_now := CURRENT_TIMESTAMP;"));
         assertTrue(postgresSql.contains("v_from_zoned := CAST(v_zoned_now AS TIMESTAMPTZ);"));
 
@@ -1467,7 +1508,7 @@ class TranspilationPipelineRawSqlTest {
         assertTrue(mysqlCurrentTimestamp.contains("SET __titan_return_value = CURRENT_TIMESTAMP;"));
 
         assertTrue(postgresCurrentInstant.contains("RETURNS TIMESTAMPTZ"));
-        assertTrue(postgresCurrentInstant.contains("RETURN CURRENT_TIMESTAMP;"));
+        assertTrue(postgresCurrentInstant.contains("RETURN CLOCK_TIMESTAMP();"));
         assertTrue(mysqlCurrentInstant.contains("RETURNS TIMESTAMP"));
         assertTrue(mysqlCurrentInstant.contains("SET __titan_return_value = UTC_TIMESTAMP();"));
     }

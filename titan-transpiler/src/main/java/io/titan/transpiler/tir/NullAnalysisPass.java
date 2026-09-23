@@ -120,12 +120,22 @@ public final class NullAnalysisPass {
      * Variables declared by the block itself go out of scope with it.
      */
     private Block analyzeBlock(Block block, Map<String, Nullness> outerState) {
-        Map<String, Nullness> state = new HashMap<>(outerState);
-        Set<String> declaredHere = new HashSet<>();
+        // Analyze lexical blocks in place. Copying the complete visible-variable map for every
+        // nested block made large generated routines quadratic in both time and allocation. Save
+        // only declarations that shadow an outer local, then remove/restore block locals on exit;
+        // assignments to genuine outer locals remain in the shared map and therefore propagate
+        // exactly as the former full-map copy/write-back did.
+        Map<String, Nullness> state = outerState;
+        Map<String, Nullness> shadowed = new HashMap<>();
+        Set<String> newlyDeclared = new HashSet<>();
         for (DeclarationNode declaration : block.declarations()) {
             if (declaration instanceof DeclareVariable variable) {
+                if (state.containsKey(variable.name())) {
+                    shadowed.put(variable.name(), state.get(variable.name()));
+                } else {
+                    newlyDeclared.add(variable.name());
+                }
                 state.put(variable.name(), variable.nullable() ? Nullness.MAYBE_NULL : Nullness.NOT_NULL);
-                declaredHere.add(variable.name());
             }
         }
 
@@ -142,8 +152,10 @@ public final class NullAnalysisPass {
                 .map(declaration -> rewriteDeclaration(declaration, state))
                 .toList();
 
-        outerState.replaceAll((name, value) ->
-                declaredHere.contains(name) ? value : state.get(name));
+        for (String name : newlyDeclared) {
+            state.remove(name);
+        }
+        state.putAll(shadowed);
 
         return new Block(rewrittenDeclarations, List.copyOf(rewrittenStatements), rewrittenHandlers);
     }

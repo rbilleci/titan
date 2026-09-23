@@ -3,11 +3,13 @@ package io.titan.transpiler;
 import com.sun.source.tree.AnnotationTree;
 import com.sun.source.tree.AssignmentTree;
 import com.sun.source.tree.BinaryTree;
+import com.sun.source.tree.BlockTree;
 import com.sun.source.tree.CompilationUnitTree;
 import com.sun.source.tree.ExpressionTree;
 import com.sun.source.tree.LiteralTree;
 import com.sun.source.tree.MethodTree;
 import com.sun.source.tree.ParenthesizedTree;
+import com.sun.source.tree.StatementTree;
 import com.sun.source.tree.Tree;
 import com.sun.source.tree.TypeCastTree;
 import com.sun.source.tree.VariableTree;
@@ -110,7 +112,11 @@ public final class SqlAnnotationProcessor {
                     }
 
                     if (methodTree.getBody() != null) {
-                        new com.sun.source.util.TreeScanner<Void, Void>() {
+                        // Preserve the concrete lexical path for local annotations. The former
+                        // TreeScanner captured the enclosing method path, so @SQL on a local
+                        // variable could see method parameters but not an earlier local in the
+                        // same block (for example a procedure's final response value).
+                        new TreePathScanner<Void, Void>() {
                             @Override
                             public Void visitVariable(VariableTree variableTree, Void innerUnused) {
                                 for (AnnotationTree annotationTree : variableTree.getModifiers().getAnnotations()) {
@@ -127,7 +133,7 @@ public final class SqlAnnotationProcessor {
                                 }
                                 return super.visitVariable(variableTree, innerUnused);
                             }
-                        }.scan(methodTree.getBody(), null);
+                        }.scan(new TreePath(methodPath, methodTree.getBody()), null);
                     }
 
                     if (!found.isEmpty()) {
@@ -169,7 +175,34 @@ public final class SqlAnnotationProcessor {
             }
             scope = scope.getEnclosingScope();
         }
+        // javac's Scope at an annotation nested on a local declaration describes the declaration
+        // being annotated, not necessarily the preceding sibling locals in its enclosing block.
+        // Recover those lexical declarations explicitly so `@SQL` can bind an already-computed
+        // result without widening the routine signature just to make a local visible.
+        collectEarlierBlockLocals(annotationPath, names);
         return names;
+    }
+
+    private static void collectEarlierBlockLocals(TreePath annotationPath, Set<String> names) {
+        for (TreePath blockPath = annotationPath.getParentPath(); blockPath != null;
+             blockPath = blockPath.getParentPath()) {
+            if (!(blockPath.getLeaf() instanceof BlockTree block)) {
+                continue;
+            }
+            TreePath directChild = annotationPath;
+            while (directChild.getParentPath() != null && directChild.getParentPath() != blockPath) {
+                directChild = directChild.getParentPath();
+            }
+            Tree directLeaf = directChild.getLeaf();
+            for (StatementTree statement : block.getStatements()) {
+                if (statement == directLeaf) {
+                    break;
+                }
+                if (statement instanceof VariableTree variable) {
+                    names.add(variable.getName().toString());
+                }
+            }
+        }
     }
 
     private static ProcessedSqlAnnotation parseSqlAnnotation(

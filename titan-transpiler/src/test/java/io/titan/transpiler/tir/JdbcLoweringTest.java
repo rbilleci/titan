@@ -128,6 +128,71 @@ class JdbcLoweringTest {
     }
 
     @Test
+    void conditionalBranchContainingJdbcReadLowersThroughJdbcPath() throws Exception {
+        // A database-resident request engine chooses its root-field read only after parsing the request.
+        // The containing conditional is not itself a JDBC shape, but its branch must still be lowered by
+        // JdbcStatementLowerer: delegating it to StatementLowerer would treat PreparedStatement and
+        // ResultSet as ordinary Java locals and fail with a type-mapping error.
+        LowerResult result = lowerCollecting("ConditionalRead", """
+                class ConditionalRead {
+                    @StoredFunction
+                    public static String run(Connection c, long id, boolean readRequested) throws SQLException {
+                        String tier = "";
+                        if (readRequested) {
+                            PreparedStatement ps = c.prepareStatement("SELECT tier FROM accounts WHERE id = ?");
+                            ps.setLong(1, id);
+                            ResultSet rs = ps.executeQuery();
+                            if (rs.next()) {
+                                tier = rs.getString("tier");
+                            }
+                        }
+                        return tier;
+                    }
+                }
+                """, io.titan.transpiler.jdbc.SqlSafetyMode.STRICT, List.of(DialectId.POSTGRESQL));
+
+        assertTrue(result.sink().errors().isEmpty(),
+                "a JDBC read nested in an ordinary branch must lower cleanly; errors=" + result.sink().errors());
+        Block block = result.lowered().values().iterator().next();
+        IfStatement branch = findFirst(block, IfStatement.class);
+        RawReadIntoStatement read = findFirst(branch.thenBlock(), RawReadIntoStatement.class);
+        assertEquals(List.of("tier"), read.variableNames());
+        assertEquals("SELECT tier FROM accounts WHERE id = ?", read.query().sql());
+        assertEquals(List.of("id"), read.query().parameters());
+    }
+
+    @Test
+    void ordinaryLoopContainingJdbcUpdateLowersThroughJdbcPath() throws Exception {
+        // The database GraphQL engine walks mutation root fields serially. Its loop condition is
+        // ordinary request state rather than rs.next(), so the JDBC lowerer must still recurse into
+        // the body to lower the prepared UPDATE.
+        LowerResult result = lowerCollecting("LoopUpdate", """
+                class LoopUpdate {
+                    @StoredProcedure
+                    public static void run(Connection c, long id, int count) throws SQLException {
+                        int index = 0;
+                        while (index < count) {
+                            PreparedStatement ps = c.prepareStatement("UPDATE accounts SET touched = ? WHERE id = ?");
+                            ps.setInt(1, index);
+                            ps.setLong(2, id);
+                            ps.executeUpdate();
+                            index++;
+                        }
+                    }
+                }
+                """, io.titan.transpiler.jdbc.SqlSafetyMode.STRICT, List.of(DialectId.POSTGRESQL));
+
+        assertTrue(result.sink().errors().isEmpty(),
+                "a JDBC update nested in an ordinary loop must lower cleanly; errors=" + result.sink().errors());
+        Block block = result.lowered().values().iterator().next();
+        WhileStatement loop = findFirst(block, WhileStatement.class);
+        ExecuteSqlStatement update = findFirst(loop.body(), ExecuteSqlStatement.class);
+        RawSql raw = assertInstanceOf(RawSql.class, update.sqlNode());
+        assertEquals("UPDATE accounts SET touched = ? WHERE id = ?", raw.sql());
+        assertEquals(List.of("index", "id"), raw.parameters());
+    }
+
+    @Test
     void atg001DirectReturnOfColumnReadIsRejectedNotEmptyInto() throws Exception {
         // ATG-001: `if (rs.next()) return rs.getLong(col); return 0L;` previously emitted an invalid empty
         // `INTO` (won't deploy). It must now be rejected with an actionable assign-then-return rewrite, and
@@ -616,9 +681,11 @@ class JdbcLoweringTest {
     }
 
     @Test
-    void nestedCursorIsRejectedWithActionableMessageNotTypeMappingCrash() throws Exception {
-        // A second ResultSet opened inside while (rs.next()) is rejected by the recognizer; the lowerer
-        // must reject with the SAME actionable message, not crash on the inner PreparedStatement's type.
+    void nestedCursorLowersAsNestedRawCursorBlocks() throws Exception {
+        // A database-resident relation walk requires an inner bound cursor for each outer row.
+        // Both cursor handles remain lexical and both select texts are constant, so lowering must
+        // retain the nested TIR shape rather than rejecting it or treating the inner statement as
+        // an ordinary Java handle.
         LowerResult result = lowerCollecting("Nested", """
                 class Nested {
                     @StoredProcedure
@@ -630,13 +697,22 @@ class JdbcLoweringTest {
                             PreparedStatement inner = c.prepareStatement("SELECT total FROM orders WHERE customer_id = ?");
                             inner.setLong(1, id);
                             ResultSet rs2 = inner.executeQuery();
+                            while (rs2.next()) {
+                                long total = rs2.getLong("total");
+                            }
                         }
                     }
                 }
                 """);
-        assertTrue(result.sink().errors().stream()
-                        .anyMatch(d -> d.code() == TitanErrorCode.E001 && d.message().contains("second ResultSet")),
-                "expected the nested-cursor E001 (not a type-mapping crash); errors=" + result.sink().errors());
+        assertTrue(result.sink().errors().isEmpty(), "nested cursors must lower cleanly: " + result.sink().errors());
+        Block outer = result.lowered().values().iterator().next();
+        RawCursorStatement outerCursor = findFirst(outer, RawCursorStatement.class);
+        RawCursorStatement innerCursor = findFirst(outerCursor.body(), RawCursorStatement.class);
+        assertEquals("SELECT id FROM customers", outerCursor.query().sql());
+        assertEquals("SELECT total FROM orders WHERE customer_id = ?", innerCursor.query().sql());
+        // The outer row value is materialized into source-local id before the inner statement
+        // binds it, so that lexical local (not the private FETCH target) is the bind.
+        assertEquals(List.of("id"), innerCursor.query().parameters());
         assertTrue(result.sink().errors().stream()
                         .noneMatch(d -> d.message().contains("No SQL type mapping")),
                 "must not surface the misleading PreparedStatement type-mapping crash; errors=" + result.sink().errors());
@@ -775,9 +851,9 @@ class JdbcLoweringTest {
     }
 
     // ---- §9 invariant 1: MySQL @StoredFunction dynamic SQL (PREPARE/EXECUTE) reject (ERROR 1336) ----
-    // MySQL forbids dynamic SQL inside a stored FUNCTION, so a JDBC read/execute (which lowers to a
-    // dynamic PREPARE/EXECUTE on MySQL) in a MySQL @StoredFunction emits non-deployable SQL. The lowerer
-    // must REJECT E001 with the actionable "annotate @StoredProcedure" steer — never silently emit it.
+    // MySQL forbids dynamic SQL inside a stored FUNCTION. Constant/bind-only reads lower to static
+    // SELECT ... INTO/cursors and remain legal; only structural splices and dynamic execute paths must
+    // REJECT E001 with the actionable "annotate @StoredProcedure" steer.
     // PRECISE: reject exactly a MySQL @StoredFunction with a dynamic-PREPARE node, and NOTHING else (no
     // false-reject of @StoredProcedure, of PostgreSQL functions, of the static cursor / generated-key
     // INSERT / unknown-shape carrier, all of which emit no dynamic PREPARE in a function).
@@ -790,9 +866,9 @@ class JdbcLoweringTest {
     }
 
     @Test
-    void mysqlStoredFunctionSingleRowReadIsRejectedE001() throws Exception {
-        // A single-row read (RawReadIntoStatement -> dynamic PREPARE/EXECUTE … INTO on MySQL) inside a
-        // MySQL @StoredFunction must REJECT with the ERROR-1336 diagnostic, not emit non-deployable SQL.
+    void mysqlStoredFunctionConstantSingleRowReadLowersStatically() throws Exception {
+        // A constant/bind-only single-row read becomes static SELECT ... INTO on MySQL, so it is
+        // legal inside a stored function and must not be false-rejected as dynamic SQL.
         LowerResult result = lowerCollecting("FnRead", """
                 class FnRead {
                     @StoredFunction
@@ -808,19 +884,16 @@ class JdbcLoweringTest {
                     }
                 }
                 """, io.titan.transpiler.jdbc.SqlSafetyMode.STRICT, List.of(DialectId.MYSQL));
-        assertTrue(result.sink().errors().stream().anyMatch(JdbcLoweringTest::isMysqlFunctionDynamicSqlReject),
-                "a MySQL @StoredFunction single-row read must be rejected E001 (ERROR 1336); errors="
-                        + result.sink().errors());
-        // The reject names ERROR 1336 so the steer is unambiguous.
-        assertTrue(result.sink().errors().stream()
-                        .anyMatch(d -> d.message().contains("ERROR 1336")),
-                "the diagnostic must cite MySQL ERROR 1336; errors=" + result.sink().errors());
+        assertTrue(result.sink().errors().isEmpty(),
+                "a static MySQL function read must lower without ERROR 1336; errors=" + result.sink().errors());
+        assertTrue(result.lowered().values().stream().flatMap(b -> b.statements().stream())
+                        .anyMatch(RawReadIntoStatement.class::isInstance),
+                "the constant single-row read must remain a static RawReadIntoStatement");
     }
 
     @Test
-    void mysqlStoredFunctionGuardThrowReadIsRejectedE001() throws Exception {
-        // The other single-row shape (the if (!rs.next()) throw guard, also a RawReadIntoStatement) is
-        // equally a dynamic read on MySQL — it must reject too (completeness: every dynamic node caught).
+    void mysqlStoredFunctionConstantGuardThrowReadLowersStatically() throws Exception {
+        // The guarded no-row form is likewise static and retains its NOT FOUND handler/raise.
         LowerResult result = lowerCollecting("FnGuard", """
                 class FnGuard {
                     @StoredFunction
@@ -836,8 +909,36 @@ class JdbcLoweringTest {
                     }
                 }
                 """, io.titan.transpiler.jdbc.SqlSafetyMode.STRICT, List.of(DialectId.MYSQL));
+        assertTrue(result.sink().errors().isEmpty(),
+                "a static MySQL function guard read must lower without ERROR 1336; errors="
+                        + result.sink().errors());
+        assertTrue(result.lowered().values().stream().flatMap(b -> b.statements().stream())
+                        .filter(RawReadIntoStatement.class::isInstance)
+                        .map(RawReadIntoStatement.class::cast)
+                        .anyMatch(read -> read.notFoundRaise() != null),
+                "the static guard read must retain its not-found raise");
+    }
+
+    @Test
+    void mysqlStoredFunctionStructurallySplicedSingleRowReadIsRejectedE001() throws Exception {
+        LowerResult result = lowerCollecting("FnDynamicRead", """
+                class FnDynamicRead {
+                    @StoredFunction
+                    public static String run(Connection c, String tableName, long id) throws SQLException {
+                        PreparedStatement ps = c.prepareStatement(
+                                "SELECT tier FROM " + tableName + " WHERE id = ?");
+                        ps.setLong(1, id);
+                        ResultSet rs = ps.executeQuery();
+                        String tier = "";
+                        if (rs.next()) {
+                            tier = rs.getString("tier");
+                        }
+                        return tier;
+                    }
+                }
+                """, io.titan.transpiler.jdbc.SqlSafetyMode.PERMISSIVE, List.of(DialectId.MYSQL));
         assertTrue(result.sink().errors().stream().anyMatch(JdbcLoweringTest::isMysqlFunctionDynamicSqlReject),
-                "a MySQL @StoredFunction guard-throw single-row read must be rejected E001; errors="
+                "a structurally spliced MySQL function read must retain the ERROR-1336 reject; errors="
                         + result.sink().errors());
     }
 
@@ -1046,10 +1147,9 @@ class JdbcLoweringTest {
     }
 
     @Test
-    void mysqlNullTargetSetConservativelyRejectsStoredFunctionDynamicRead() throws Exception {
-        // mysqlTargeted is conservatively TRUE when the target set is unknown (null) — so a
-        // @StoredFunction dynamic read with no declared targets is rejected (it MIGHT target MySQL).
-        // Mirrors the decision-1 cursor reject's conservative-true posture.
+    void mysqlNullTargetSetAllowsStoredFunctionStaticRead() throws Exception {
+        // An unknown target set is conservatively MySQL-capable, but this read remains static on
+        // every dialect and therefore must not be rejected as dynamic SQL.
         LowerResult result = lowerCollecting("FnReadNullTargets", """
                 class FnReadNullTargets {
                     @StoredFunction
@@ -1065,9 +1165,9 @@ class JdbcLoweringTest {
                     }
                 }
                 """, io.titan.transpiler.jdbc.SqlSafetyMode.STRICT, null);
-        assertTrue(result.sink().errors().stream().anyMatch(JdbcLoweringTest::isMysqlFunctionDynamicSqlReject),
-                "an unknown target set (null) must conservatively reject a @StoredFunction dynamic read; "
-                        + "errors=" + result.sink().errors());
+        assertTrue(result.sink().errors().stream().noneMatch(JdbcLoweringTest::isMysqlFunctionDynamicSqlReject),
+                "an unknown target set must not turn a static read into dynamic SQL; errors="
+                        + result.sink().errors());
     }
 
     // ---- §9 invariant 1 precision: @ScheduledJob is NOT a FUNCTION/trigger (procedure-backed EVENT) ----

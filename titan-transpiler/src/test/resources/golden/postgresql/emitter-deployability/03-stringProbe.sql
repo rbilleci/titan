@@ -16,7 +16,7 @@ BEGIN
         IF v_score IS NULL THEN RAISE EXCEPTION 'NullPointerException at build/golden-fixtures/emitter-deployability.java:40'; END IF;
         v_score := (v_score + 10);
     END IF;
-    IF COALESCE(CASE WHEN p_needle IS NULL THEN FALSE ELSE (p_text = p_needle) END, FALSE) THEN
+    IF COALESCE(CASE WHEN p_needle IS NULL THEN FALSE ELSE (CONVERT_TO(p_text, 'UTF8') = CONVERT_TO(p_needle, 'UTF8')) END, FALSE) THEN
         -- titan:source:build/golden-fixtures/emitter-deployability.java:40
         IF v_score IS NULL THEN RAISE EXCEPTION 'NullPointerException at build/golden-fixtures/emitter-deployability.java:40'; END IF;
         v_score := (v_score + 100);

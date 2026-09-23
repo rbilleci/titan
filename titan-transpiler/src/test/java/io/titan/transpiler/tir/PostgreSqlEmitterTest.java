@@ -62,6 +62,16 @@ class PostgreSqlEmitterTest {
     }
 
     @Test
+    void removesAbsolutePathsFromPublishedNullGuardProvenance() {
+        String sql = new PostgreSqlEmitter().visitNullGuardStatement(
+                new NullGuardStatement("v_total", "/private/build-agent/workspace/secrets/Source.java:42"));
+
+        assertTrue(sql.contains("-- titan:source:Source.java:42"), sql);
+        assertTrue(sql.contains("NullPointerException at Source.java:42"), sql);
+        assertFalse(sql.contains("/private/build-agent"), sql);
+    }
+
+    @Test
     void rejectsUnrewrittenCompareToMarker() {
         // N2 invariant (plan 2.3): the __titan_compare_to marker emitted by the lowerer must be
         // rewritten (and null-guarded) by NullAnalysisPass; reaching the emitter means the pass
@@ -938,6 +948,22 @@ class PostgreSqlEmitterTest {
                 "__titan_char_code",
                 List.of(new LiteralExpression('7', new TTextType())),
                 null));
+        String base64UrlEncodeSql = emitter.visitFunctionCallExpression(new FunctionCallExpression(
+                "__titan_text_base64url_encode_utf8",
+                List.of(new VariableRefExpression("v_text")),
+                null));
+        String base64UrlDecodeSql = emitter.visitFunctionCallExpression(new FunctionCallExpression(
+                "__titan_text_base64url_decode_utf8",
+                List.of(new VariableRefExpression("v_base64")),
+                null));
+        String base64UrlAlphabetIndexSql = emitter.visitFunctionCallExpression(new FunctionCallExpression(
+                "__titan_text_base64url_alphabet_index",
+                List.of(new VariableRefExpression("v_char")),
+                null));
+        String stringEqualsSql = emitter.visitFunctionCallExpression(new FunctionCallExpression(
+                "__titan_str_equals",
+                List.of(new VariableRefExpression("v_left"), new VariableRefExpression("v_right")),
+                null));
         String indexOfFromSql = emitter.visitFunctionCallExpression(new FunctionCallExpression(
                 "__titan_str_index_of",
                 List.of(
@@ -978,6 +1004,14 @@ class PostgreSqlEmitterTest {
 
         assertTrue(concatSql.equals("(COALESCE(CAST(v_left AS TEXT), 'null') || COALESCE(CAST(v_right AS TEXT), 'null'))"));
         assertEquals("ASCII('7')", charCodeSql);
+        assertEquals("TRANSLATE(RTRIM(ENCODE(CONVERT_TO(v_text, 'UTF8'), 'base64'), '='), '+/', '-_')",
+                base64UrlEncodeSql);
+        assertEquals("CONVERT_FROM(DECODE(TRANSLATE(v_base64, '-_', '+/') || REPEAT('=', (4 - (CHAR_LENGTH(v_base64) % 4)) % 4), 'base64'), 'UTF8')",
+                base64UrlDecodeSql);
+        assertEquals("(POSITION(CONVERT_TO(v_char, 'UTF8') IN CONVERT_TO("
+                        + "'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_', 'UTF8')) - 1)",
+                base64UrlAlphabetIndexSql);
+        assertEquals("(CONVERT_TO(v_left, 'UTF8') = CONVERT_TO(v_right, 'UTF8'))", stringEqualsSql);
         assertTrue(indexOfSql.contains("STRPOS(v_text, 'x') - 1"));
         assertTrue(indexOfFromSql.contains("GREATEST(v_from, 0)"));
         assertTrue(indexOfFromSql.contains("SUBSTRING(v_text FROM (GREATEST(v_from, 0) + 1))"));
@@ -1026,6 +1060,10 @@ class PostgreSqlEmitterTest {
                 List.of(new VariableRefExpression("v_ts")),
                 null));
         String instantNow = emitter.visitFunctionCallExpression(new FunctionCallExpression("__titan_time_instant_now", List.of(), null));
+        String instantOfEpochMillis = emitter.visitFunctionCallExpression(new FunctionCallExpression(
+                "__titan_time_instant_of_epoch_millis",
+                List.of(new VariableRefExpression("v_epoch_millis")),
+                null));
         String zonedNow = emitter.visitFunctionCallExpression(new FunctionCallExpression("__titan_time_zoneddatetime_now", List.of(), null));
         String toInstant = emitter.visitFunctionCallExpression(new FunctionCallExpression(
                 "__titan_time_to_instant",
@@ -1050,7 +1088,8 @@ class PostgreSqlEmitterTest {
         assertTrue(nowDate.equals("CURRENT_DATE"));
         assertTrue(plusDays.equals("(v_date + (2 * INTERVAL '1 day'))"));
         assertTrue(toDate.equals("DATE(v_ts)"));
-        assertTrue(instantNow.equals("CURRENT_TIMESTAMP"));
+        assertTrue(instantNow.equals("CLOCK_TIMESTAMP()"));
+        assertTrue(instantOfEpochMillis.equals("TO_TIMESTAMP((v_epoch_millis) / 1000.0)"));
         assertTrue(zonedNow.equals("CURRENT_TIMESTAMP"));
         assertTrue(toInstant.equals("CAST(v_ts AS TIMESTAMPTZ)"));
         assertTrue(duration.equals("(90 * INTERVAL '1 second')"));

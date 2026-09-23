@@ -2,7 +2,7 @@ package io.titan.transpiler.tir;
 
 import java.util.List;
 
-public sealed interface TirType permits TIntType, TBigintType, TTextType, TBooleanType, TNumericType,
+public sealed interface TirType permits TIntType, TBigintType, TTextType, TBooleanType, TNumericType, TDoubleType,
         TDateType, TTimeType, TTimestampType, TTimestampTzType, TDurationType, TPeriodType, TArrayType, TJsonType,
         TCompositeType, TRecordType, TUuidType, TBytesType, TVoidType {
 }
@@ -12,6 +12,8 @@ record TBigintType() implements TirType {}
 record TTextType() implements TirType {}
 record TBooleanType() implements TirType {}
 record TNumericType(int precision, int scale) implements TirType {}
+/** IEEE-754 binary64 value: DOUBLE PRECISION on PostgreSQL and DOUBLE on MySQL. */
+record TDoubleType() implements TirType {}
 record TDateType() implements TirType {}
 record TTimeType() implements TirType {}
 record TTimestampType() implements TirType {}

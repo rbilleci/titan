@@ -124,13 +124,11 @@ class JdbcEndToEndTest {
                 "the three placeholders must bind the three setLong ordinals in order; was:\n" + pg);
     }
 
-    /** The same placeholder run transpiles on MySQL too (PREPARE … IN (?, ?, ?); EXECUTE … USING @p…). */
+    /** The same placeholder run transpiles on MySQL as native static SQL with typed parameters. */
     @Test
     void placeholderRunRecoversAndBindsByOrdinalOnMysql() throws Exception {
-        // @StoredProcedure (not @StoredFunction): MySQL forbids dynamic SQL (PREPARE/EXECUTE) inside a
-        // FUNCTION (ERROR 1336) — a pre-existing JDBC-read emitter limitation independent of Rung 1
-        // (design contract §9). The live deploy IT placeholderRunDeploysAndFlagsBoundIdsOnMysql proves
-        // the procedure form on MySQL 8.4; this byte-golden must therefore assert deployable SQL.
+        // The live deploy IT placeholderRunDeploysAndFlagsBoundIdsOnMysql proves the procedure form on
+        // MySQL 8.4; this byte-golden also locks out needless dynamic SQL.
         List<TranspilationPipeline.GeneratedSql> generated = transpile("PlaceholderRunMy.java", """
                 import titan.dsl.StoredProcedure;
                 import java.sql.*;
@@ -148,11 +146,10 @@ class JdbcEndToEndTest {
                 }
                 """, "mysql");
         String my = sqlFor(generated, "mysql");
-        assertTrue(my.contains("WHERE id IN (?, ?, ?)"),
-                "MySQL keeps ? placeholders in the recovered run; was:\n" + my);
-        assertTrue(my.contains("SET @titan_p1 = p_a;") && my.contains("SET @titan_p2 = p_b;")
-                        && my.contains("SET @titan_p3 = p_d;"),
-                "the three placeholders must bind the three setLong ordinals in order; was:\n" + my);
+        assertTrue(my.contains("WHERE id IN (p_a, p_b, p_d)"),
+                "MySQL must preserve ordinal order with typed routine parameters; was:\n" + my);
+        assertFalse(my.contains("PREPARE") || my.contains("@titan_p"),
+                "the fixed placeholder run must remain native static SQL; was:\n" + my);
     }
 
     /**
@@ -189,11 +186,10 @@ class JdbcEndToEndTest {
         assertFalse(pg.contains("tier = ' "), "the value must not be spliced verbatim into the text; was:\n" + pg);
     }
 
-    /** The value-splice also transpiles on MySQL (PREPARE … = ?; EXECUTE … USING @p). */
+    /** The value-splice also transpiles on MySQL through a typed synthesized local. */
     @Test
     void valueSpliceAutoBindsOnMysql() throws Exception {
-        // @StoredProcedure for the same MySQL-dynamic-SQL-in-FUNCTION reason as above (design contract
-        // §9); the live deploy IT valueSpliceDeploysAndFlagsByBoundValueOnMysql proves it on MySQL 8.4.
+        // The live deploy IT valueSpliceDeploysAndFlagsByBoundValueOnMysql proves this on MySQL 8.4.
         List<TranspilationPipeline.GeneratedSql> generated = transpile("ValueSpliceMy.java", """
                 import titan.dsl.StoredProcedure;
                 import java.sql.*;
@@ -208,9 +204,12 @@ class JdbcEndToEndTest {
                 }
                 """, "mysql");
         String my = sqlFor(generated, "mysql");
-        assertTrue(my.contains("WHERE tier = ?"), "MySQL binds the value with a ? placeholder; was:\n" + my);
-        assertTrue(my.contains("SET @titan_p1 = __titan_p"),
-                "the value splice must bind a synthesized local; was:\n" + my);
+        assertTrue(my.contains("WHERE tier = __titan_p1"),
+                "MySQL must reference the typed synthesized local; was:\n" + my);
+        assertTrue(my.contains("SET __titan_p1 = p_tier"),
+                "the value splice must assign the source value to the synthesized local; was:\n" + my);
+        assertFalse(my.contains("PREPARE") || my.contains("@titan_p"),
+                "a value-only splice must not force dynamic SQL; was:\n" + my);
     }
 
     /**

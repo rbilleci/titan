@@ -17,6 +17,7 @@ import com.sun.source.tree.VariableTree;
 import com.sun.source.util.TreePath;
 import com.sun.source.util.TreeScanner;
 import io.titan.transpiler.ParsedSources;
+import io.titan.transpiler.LoweringContext;
 import io.titan.transpiler.diagnostics.TitanErrorCode;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
@@ -607,7 +608,8 @@ final class DslQueryLowerer {
                     parsedSources,
                     "Bind the table to a local variable of its concrete generated type (or use var) before calling selectFrom(...), or rewrite the query as select(table.COL1, ...).from(table) for now");
         }
-        Tree declaration = parsedSources.trees().getTree(typeElement);
+        TreePath declarationPath = LoweringContext.forSources(parsedSources).sourceDeclarationPath(typeElement);
+        Tree declaration = declarationPath == null ? null : declarationPath.getLeaf();
         if (!(declaration instanceof ClassTree classTree)) {
             throw LowererSupport.unsupportedFeature("Could not inspect selectFrom(...) table declaration", identifierTree, parsedSources);
         }
@@ -806,8 +808,8 @@ final class DslQueryLowerer {
         if (!(element instanceof VariableElement variableElement)) {
             return null;
         }
-        Tree declarationTree = parsedSources.trees().getTree(variableElement);
-        if (!(declarationTree instanceof VariableTree variableTree)) {
+        VariableTree variableTree = LoweringContext.forSources(parsedSources).sourceVariableTree(variableElement);
+        if (variableTree == null) {
             return null;
         }
         return variableTree.getInitializer();
@@ -2102,7 +2104,8 @@ final class DslQueryLowerer {
         if (annotatedPhysicalTableName != null && !annotatedPhysicalTableName.isBlank()) {
             return annotatedPhysicalTableName;
         }
-        Tree declaration = parsedSources.trees().getTree(typeElement);
+        TreePath declarationPath = LoweringContext.forSources(parsedSources).sourceDeclarationPath(typeElement);
+        Tree declaration = declarationPath == null ? null : declarationPath.getLeaf();
         if (!(declaration instanceof ClassTree classTree)) {
             return null;
         }
@@ -2152,7 +2155,8 @@ final class DslQueryLowerer {
         if (annotatedSchema != null && !annotatedSchema.isBlank()) {
             return annotatedSchema;
         }
-        Tree declaration = parsedSources.trees().getTree(typeElement);
+        TreePath declarationPath = LoweringContext.forSources(parsedSources).sourceDeclarationPath(typeElement);
+        Tree declaration = declarationPath == null ? null : declarationPath.getLeaf();
         if (!(declaration instanceof ClassTree classTree)) {
             return null;
         }
@@ -2220,8 +2224,8 @@ final class DslQueryLowerer {
         if (annotatedPhysicalColumnName != null && !annotatedPhysicalColumnName.isBlank()) {
             return annotatedPhysicalColumnName;
         }
-        Tree declarationTree = parsedSources.trees().getTree(variableElement);
-        if (!(declarationTree instanceof VariableTree variableTree) || variableTree.getInitializer() == null) {
+        VariableTree variableTree = LoweringContext.forSources(parsedSources).sourceVariableTree(variableElement);
+        if (variableTree == null || variableTree.getInitializer() == null) {
             return memberSelectTree.getIdentifier().toString();
         }
         ExpressionTree initializer = variableTree.getInitializer();
@@ -2285,8 +2289,8 @@ final class DslQueryLowerer {
         if (!(element instanceof VariableElement variableElement)) {
             return false;
         }
-        Tree declarationTree = parsedSources.trees().getTree(variableElement);
-        if (!(declarationTree instanceof VariableTree variableTree)
+        VariableTree variableTree = LoweringContext.forSources(parsedSources).sourceVariableTree(variableElement);
+        if (variableTree == null
                 || !(variableTree.getInitializer() instanceof MethodInvocationTree invocation)
                 || !(invocation.getMethodSelect() instanceof IdentifierTree identifier)
                 || !"column".contentEquals(identifier.getName())

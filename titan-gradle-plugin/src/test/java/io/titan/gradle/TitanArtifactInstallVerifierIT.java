@@ -182,6 +182,61 @@ class TitanArtifactInstallVerifierIT {
     }
 
     @Test
+    void mysqlPacketPreflightRejectsOversizedPackageBeforeAnyRoutineIsInstalled() throws Exception {
+        Path artifactRoot = Files.createTempDirectory("titan-gap005-mysql-packet-artifact");
+        Files.createDirectories(artifactRoot.resolve("mysql"));
+        String sql = "CREATE FUNCTION titan_gap005_probe(input_value INT) RETURNS INT DETERMINISTIC "
+                + "RETURN input_value /* " + "x".repeat(4096) + " */";
+        Files.writeString(artifactRoot.resolve("mysql/titan_gap005_probe.sql"), sql, StandardCharsets.UTF_8);
+
+        TitanObjectInventory inventory = inventory("mysql", MYSQL.getDatabaseName(), "(input_value int)", sql);
+        TitanArtifactManifest manifest = manifest("mysql", inventory, "(input_value int)", "int", sql);
+        TitanInstallPlan installPlan = TitanInstallPlan.from(manifest, inventory);
+        long originalPacketBytes;
+        try (var configuration = DriverManager.getConnection(
+                MYSQL.getJdbcUrl(), "root", MYSQL.getPassword());
+             var statement = configuration.createStatement();
+             var resultSet = statement.executeQuery("SELECT @@GLOBAL.max_allowed_packet")) {
+            assertTrue(resultSet.next());
+            originalPacketBytes = resultSet.getLong(1);
+            statement.execute("SET GLOBAL max_allowed_packet = 1024");
+        }
+
+        try {
+            // A fresh connection inherits the deliberately constrained global setting. The
+            // verifier must report the preflight and return before it sends this CREATE FUNCTION.
+            try (var connection = DriverManager.getConnection(
+                    MYSQL.getJdbcUrl(), MYSQL.getUsername(), MYSQL.getPassword())) {
+                TitanInstallVerification report = TitanArtifactInstallVerifier.verifyAndWrite(
+                        manifest,
+                        inventory,
+                        installPlan,
+                        artifactRoot,
+                        new TitanArtifactInstallVerifier.ScratchDatabase(
+                                "mysql",
+                                MYSQL.getDockerImageName(),
+                                connection));
+
+                assertEquals("failed", report.status(), report.toJson());
+                assertTrue(report.toJson().contains("TITAN-GAP005-MYSQL-PACKET-PREFLIGHT"), report.toJson());
+                try (var statement = connection.createStatement();
+                     var resultSet = statement.executeQuery("SELECT COUNT(*) FROM information_schema.routines "
+                             + "WHERE routine_schema = '" + MYSQL.getDatabaseName()
+                             + "' AND routine_name = 'titan_gap005_probe'")) {
+                    assertTrue(resultSet.next());
+                    assertEquals(0, resultSet.getInt(1), "packet preflight must precede package SQL");
+                }
+            }
+        } finally {
+            try (var restore = DriverManager.getConnection(
+                    MYSQL.getJdbcUrl(), "root", MYSQL.getPassword());
+                 var statement = restore.createStatement()) {
+                statement.execute("SET GLOBAL max_allowed_packet = " + originalPacketBytes);
+            }
+        }
+    }
+
+    @Test
     void brokenInstallStepReportsActionableDiagnostic() throws Exception {
         Path artifactRoot = Files.createTempDirectory("titan-gap005-broken-artifact");
         Files.createDirectories(artifactRoot.resolve("postgresql"));

@@ -9,6 +9,7 @@ final class MySqlTypeMapper implements TypeMapper {
             case TBooleanType ignored -> "BOOLEAN";
             case TTextType ignored -> "TEXT";
             case TNumericType t -> "DECIMAL(" + t.precision() + "," + t.scale() + ")";
+            case TDoubleType ignored -> "DOUBLE";
             case TDateType ignored -> "DATE";
             case TTimeType ignored -> "TIME";
             // E-13 (plan 3.1): bare DATETIME/TIMESTAMP have second precision on MySQL — Java's

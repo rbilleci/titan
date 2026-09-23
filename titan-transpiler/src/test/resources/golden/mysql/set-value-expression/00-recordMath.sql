@@ -4,13 +4,17 @@ CREATE PROCEDURE `test`.`record_math`(IN p_id INT, IN p_factor INT, IN p_name TE
 SQL SECURITY INVOKER
 BEGIN
     DECLARE __titan_saved_time_zone VARCHAR(64) DEFAULT @@session.time_zone;
+    DECLARE __titan_time_zone_pinned BOOLEAN DEFAULT FALSE;
     DECLARE EXIT HANDLER FOR SQLEXCEPTION
     BEGIN
-        SET time_zone = __titan_saved_time_zone;
+        IF __titan_time_zone_pinned THEN SET time_zone = __titan_saved_time_zone; END IF;
         RESIGNAL;
     END;
-    SET time_zone = '+00:00';
+    IF @@session.time_zone <> '+00:00' THEN
+        SET time_zone = '+00:00';
+        SET __titan_time_zone_pinned = TRUE;
+    END IF;
     INSERT INTO `test`.`math_events` (`id`, `score`, `label`) VALUES ((p_id + 100), (p_id * p_factor), CONCAT(COALESCE(CAST(p_name AS CHAR), 'null'), COALESCE(CAST('-tag' AS CHAR), 'null')));
-    SET time_zone = __titan_saved_time_zone;
+    IF __titan_time_zone_pinned THEN SET time_zone = __titan_saved_time_zone; END IF;
 END$$
 DELIMITER ;
