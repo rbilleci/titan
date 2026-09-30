@@ -695,7 +695,8 @@ public final class TitanArtifactInstallVerifier {
                             + "' AND routine_name = '"
                             + sqlLiteral(object.name()) + "'";
             case "mysql" ->
-                    "SELECT COUNT(*) FROM information_schema.routines WHERE routine_schema = DATABASE() AND routine_name = '"
+                    "SELECT COUNT(*) FROM information_schema.routines WHERE routine_schema = '"
+                            + sqlLiteral(object.schema()) + "' AND routine_name = '"
                             + sqlLiteral(object.name()) + "'";
             default -> "";
         };
@@ -709,20 +710,6 @@ public final class TitanArtifactInstallVerifier {
             }
         } catch (SQLException ignored) {
             return metadataRoutineExists(connection, object);
-        }
-        if (dialect.equals("mysql")) {
-            // MySQL routines may live in a schema other than the connection's default database
-            // (the transpiler qualifies routine names with the configured schema).
-            String schemaQuery = "SELECT COUNT(*) FROM information_schema.routines WHERE routine_schema = '"
-                    + sqlLiteral(object.schema())
-                    + "' AND routine_name = '"
-                    + sqlLiteral(object.name()) + "'";
-            try (Statement statement = connection.createStatement();
-                 ResultSet resultSet = statement.executeQuery(schemaQuery)) {
-                return resultSet.next() && resultSet.getInt(1) > 0;
-            } catch (SQLException ignored) {
-                return metadataRoutineExists(connection, object);
-            }
         }
         return false;
     }
@@ -744,12 +731,12 @@ public final class TitanArtifactInstallVerifier {
                             + sqlLiteral(object.name())
                             + "') AND parameter_mode IN ('IN', 'INOUT')";
             case "mysql" ->
-                    "SELECT COUNT(*) FROM information_schema.parameters WHERE specific_schema IN (DATABASE(), '"
+                    "SELECT COUNT(*) FROM information_schema.parameters WHERE specific_schema = '"
                             + sqlLiteral(object.schema())
-                            + "') AND specific_name IN (SELECT specific_name FROM information_schema.routines"
-                            + " WHERE routine_schema IN (DATABASE(), '"
+                            + "' AND specific_name IN (SELECT specific_name FROM information_schema.routines"
+                            + " WHERE routine_schema = '"
                             + sqlLiteral(object.schema())
-                            + "') AND routine_name = '"
+                            + "' AND routine_name = '"
                             + sqlLiteral(object.name())
                             + "') AND parameter_mode IN ('IN', 'INOUT')";
             default -> "";
@@ -778,7 +765,8 @@ public final class TitanArtifactInstallVerifier {
                             + sqlLiteral(object.schema())
                             + "' AND p.proname = '"
                             + sqlLiteral(object.name()) + "' LIMIT 1";
-            case "mysql" -> "SHOW CREATE " + object.kind().toUpperCase(Locale.ROOT) + " `" + object.name() + "`";
+            case "mysql" -> "SHOW CREATE " + object.kind().toUpperCase(Locale.ROOT) + " `"
+                    + object.schema().replace("`", "``") + "`.`" + object.name().replace("`", "``") + "`";
             default -> "";
         };
         if (query.isBlank()) {

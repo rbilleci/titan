@@ -2,6 +2,7 @@ CREATE OR REPLACE FUNCTION "test"."int_remainder"(p_dividend INTEGER, p_divisor 
 RETURNS INTEGER
 LANGUAGE plpgsql
 SECURITY INVOKER
+SET search_path = "test", public, pg_temp
 AS $$
 BEGIN
     -- titan:source:build/golden-fixtures/emitter-deployability.java:242

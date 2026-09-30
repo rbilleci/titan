@@ -56,7 +56,7 @@ public final class PostgreSqlEmitter extends AbstractSqlEmitter {
         out.line("CREATE OR REPLACE PROCEDURE " + qualified + "(" + routineParameterSignature() + ")");
         out.line("LANGUAGE plpgsql");
         out.line("SECURITY " + toPostgresSecurityKeyword(securityMode));
-        emitPostgresDefinerSearchPath(securityMode, schema);
+        emitPostgresRoutineSearchPath(securityMode, schema);
         out.line("AS $$");
         emitPostgresDeclarationSection(body, observability);
         out.line("BEGIN");
@@ -110,7 +110,7 @@ public final class PostgreSqlEmitter extends AbstractSqlEmitter {
         out.line("RETURNS " + sqlType(returnType));
         out.line("LANGUAGE plpgsql");
         out.line("SECURITY " + toPostgresSecurityKeyword(securityMode));
-        emitPostgresDefinerSearchPath(securityMode, schema);
+        emitPostgresRoutineSearchPath(securityMode, schema);
         out.line("AS $$");
         emitPostgresDeclarationSection(body, observability);
         out.line("BEGIN");
@@ -164,7 +164,7 @@ public final class PostgreSqlEmitter extends AbstractSqlEmitter {
         out.line("RETURNS TRIGGER");
         out.line("LANGUAGE plpgsql");
         out.line("SECURITY " + toPostgresSecurityKeyword(securityMode));
-        emitPostgresDefinerSearchPath(securityMode, schema);
+        emitPostgresRoutineSearchPath(securityMode, schema);
         out.line("AS $$");
         emitPostgresDeclarationSection(body, false);
         out.line("BEGIN");
@@ -501,15 +501,12 @@ public final class PostgreSqlEmitter extends AbstractSqlEmitter {
         };
     }
 
-    /**
-     * ATG-017: pin {@code search_path} on a SECURITY DEFINER routine to its own schema (+ {@code pg_temp}).
-     * A DEFINER routine runs with the owner's privileges, so an unpinned {@code search_path} lets a caller
-     * shadow the routine's functions/operators/types and escalate — the classic SECURITY DEFINER attack.
-     * INVOKER routines run with the caller's own privileges and are not pinned.
-     */
-    private void emitPostgresDefinerSearchPath(SecurityMode securityMode, String schema) {
+    /** Keeps generated routine calls in their installed schema independent of the caller's search path. */
+    private void emitPostgresRoutineSearchPath(SecurityMode securityMode, String schema) {
         if (securityMode == SecurityMode.DEFINER) {
             out.line("SET search_path = " + quoteIdentifier(schema) + ", pg_temp");
+        } else if (!"public".equals(schema)) {
+            out.line("SET search_path = " + quoteIdentifier(schema) + ", public, pg_temp");
         }
     }
 

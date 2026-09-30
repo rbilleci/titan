@@ -243,6 +243,21 @@ class ManagementTransactionsTest {
     }
 
     @Test
+    void artifactGenerationSeedsCommitAsOneFileBatch() throws Exception {
+        Path transactionLog = tempDir.resolve("artifact-generation.log");
+        FileTransactionalMutationStore store = new FileTransactionalMutationStore(transactionLog);
+        store.seedArtifactGeneration(validatedDraft(T1), artifactRef());
+
+        String journal = Files.readString(transactionLog);
+        assertTrue(journal.contains("BATCH_BEGIN\nARTIFACT\t"));
+        assertTrue(journal.contains("\nDRAFT\t"));
+        assertTrue(journal.contains("\nBATCH_COMMIT\n"));
+        FileTransactionalMutationStore reloaded = new FileTransactionalMutationStore(transactionLog);
+        assertTrue(reloaded.draft("draft-demo-blog-001").isPresent());
+        assertTrue(reloaded.artifactRef("artifact-demo-blog-001").isPresent());
+    }
+
+    @Test
     void emptyAndMissingDurableManagementReadsAreDeterministic() {
         FileTransactionalMutationStore store = new FileTransactionalMutationStore(tempDir.resolve("empty-reads.log"));
 

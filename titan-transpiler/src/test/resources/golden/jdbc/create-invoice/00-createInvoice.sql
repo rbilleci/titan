@@ -2,6 +2,7 @@ CREATE OR REPLACE FUNCTION "billing"."create_invoice"(p_customer_id BIGINT, p_am
 RETURNS BIGINT
 LANGUAGE plpgsql
 SECURITY INVOKER
+SET search_path = "billing", public, pg_temp
 AS $$
 DECLARE
     __titan_genkey1 BIGINT;

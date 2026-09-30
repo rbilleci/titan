@@ -2,6 +2,7 @@ CREATE OR REPLACE FUNCTION "test"."compare_score"(p_current NUMERIC(38,10), p_th
 RETURNS INTEGER
 LANGUAGE plpgsql
 SECURITY INVOKER
+SET search_path = "test", public, pg_temp
 AS $$
 DECLARE
     v_cmp INTEGER;

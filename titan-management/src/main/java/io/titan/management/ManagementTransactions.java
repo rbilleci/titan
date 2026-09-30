@@ -85,6 +85,8 @@ public final class ManagementTransactions {
 
         void seedArtifactRef(ArtifactRef artifactRef);
 
+        void seedArtifactGeneration(Draft draft, ArtifactRef artifactRef);
+
         void seedDeployment(Deployment deployment);
 
         Optional<Draft> draft(String draftId);
@@ -222,6 +224,15 @@ public final class ManagementTransactions {
         public void seedArtifactRef(ArtifactRef artifactRef) {
             synchronized (pathLock) {
                 appendLines(List.of(encodeArtifactRef(artifactRef)));
+            }
+        }
+
+        @Override
+        public void seedArtifactGeneration(Draft draft, ArtifactRef artifactRef) {
+            Objects.requireNonNull(draft, "draft");
+            Objects.requireNonNull(artifactRef, "artifact ref");
+            synchronized (pathLock) {
+                appendCommittedBatch(List.of(encodeArtifactRef(artifactRef), encodeDraft(draft)));
             }
         }
 

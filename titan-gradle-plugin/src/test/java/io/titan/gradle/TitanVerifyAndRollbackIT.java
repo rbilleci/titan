@@ -95,6 +95,7 @@ class TitanVerifyAndRollbackIT {
              Statement statement = connection.createStatement()) {
             statement.execute("CREATE DATABASE IF NOT EXISTS `public`");
             statement.execute("CREATE DATABASE IF NOT EXISTS `titan_runtime`");
+            statement.execute("USE `public`");
 
             TitanInstallVerification report = TitanArtifactInstallVerifier.verifyAndWrite(
                     packaged.artifacts().manifest(),
@@ -107,7 +108,7 @@ class TitanVerifyAndRollbackIT {
 
             assertEquals(1, countMysqlRoutines(connection, "public", "get_user_orders"));
             assertEquals(1, countMysqlRoutines(connection, "public", "__record_price_tier__new"));
-            assertEquals(1, countMysqlRoutines(connection, MYSQL.getDatabaseName(), "titan_rt_java_mod"));
+            assertEquals(1, countMysqlRoutines(connection, "public", "titan_rt_java_mod"));
             assertEquals(1, countMysqlEvents(connection, "nightly_refresh"));
             assertEquals(1, countMysqlTables(connection, "titan_runtime", "telemetry"));
 
@@ -118,7 +119,7 @@ class TitanVerifyAndRollbackIT {
             assertEquals(0, countMysqlRoutines(connection, "public", "tier_label"));
             assertEquals(0, countMysqlRoutines(connection, "public", "refresh_nightly"));
             assertEquals(0, countMysqlRoutines(connection, "public", "__record_price_tier__new"));
-            assertEquals(0, countMysqlRoutines(connection, MYSQL.getDatabaseName(), "titan_rt_java_mod"));
+            assertEquals(0, countMysqlRoutines(connection, "public", "titan_rt_java_mod"));
             assertEquals(0, countMysqlEvents(connection, "nightly_refresh"));
             assertEquals(0, countMysqlTables(connection, "titan_runtime", "telemetry"));
         }

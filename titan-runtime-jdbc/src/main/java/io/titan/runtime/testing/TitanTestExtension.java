@@ -12,7 +12,9 @@ import org.junit.jupiter.api.extension.ParameterResolver;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.util.ArrayList;
 import java.util.EnumMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -111,6 +113,7 @@ public final class TitanTestExtension
         private final SharedContainers containers;
         private final Map<DatabaseTarget, String> databaseNames = new EnumMap<>(DatabaseTarget.class);
         private final Map<DatabaseTarget, Connection> realConnections = new EnumMap<>(DatabaseTarget.class);
+        private final List<Connection> additionalConnections = new ArrayList<>();
         private TitanTestContext context;
 
         private PerTestEnvironment(SharedContainers containers) {
@@ -135,8 +138,19 @@ public final class TitanTestExtension
             Map<DatabaseTarget, Connection> proxies = new EnumMap<>(DatabaseTarget.class);
             environment.realConnections.forEach(
                     (target, connection) -> proxies.put(target, NonClosingConnection.wrap(connection)));
-            environment.context = new TitanTestContext(proxies);
+            environment.context = new TitanTestContext(proxies, environment::openAdditionalConnection);
             return environment;
+        }
+
+        private synchronized Connection openAdditionalConnection(DatabaseTarget target) throws SQLException {
+            String databaseName = databaseNames.get(target);
+            if (databaseName == null) {
+                throw new IllegalArgumentException("No database configured for target " + target);
+            }
+            Connection connection = target == DatabaseTarget.POSTGRESQL
+                    ? containers.openPostgres(databaseName) : containers.openMysqlRoot(databaseName);
+            additionalConnections.add(connection);
+            return connection;
         }
 
         TitanTestContext context() {
@@ -201,6 +215,14 @@ public final class TitanTestExtension
          */
         void close() throws SQLException {
             SQLException failure = null;
+            for (Connection connection : additionalConnections) {
+                try {
+                    connection.close();
+                } catch (SQLException ex) {
+                    failure = chain(failure, ex);
+                }
+            }
+            additionalConnections.clear();
             for (Map.Entry<DatabaseTarget, Connection> entry : realConnections.entrySet()) {
                 try {
                     entry.getValue().close();

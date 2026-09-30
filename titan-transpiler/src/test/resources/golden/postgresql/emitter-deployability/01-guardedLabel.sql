@@ -2,6 +2,7 @@ CREATE OR REPLACE FUNCTION "test"."guarded_label"(p_input TEXT, p_fail_fast BOOL
 RETURNS TEXT
 LANGUAGE plpgsql
 SECURITY INVOKER
+SET search_path = "test", public, pg_temp
 AS $$
 DECLARE
     v_label TEXT;

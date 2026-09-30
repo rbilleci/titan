@@ -12,8 +12,9 @@ import org.junit.jupiter.api.io.TempDir;
 /**
  * ATG-017 (Part 1): a SECURITY DEFINER routine must pin {@code search_path} to its own schema (+
  * {@code pg_temp}) — the classic hardening against a caller shadowing the routine's
- * functions/operators/types. An INVOKER routine runs with the caller's own privileges and is NOT
- * pinned. MySQL has no {@code search_path} concept, so the clause is PostgreSQL-only.
+ * functions/operators/types. An INVOKER routine in a non-public schema pins its own schema first
+ * so generated same-schema helper calls do not depend on the caller's path. MySQL has no
+ * {@code search_path} concept, so the clause is PostgreSQL-only.
  */
 class SecurityDefinerSearchPathTest {
 
@@ -70,11 +71,10 @@ class SecurityDefinerSearchPathTest {
     }
 
     @Test
-    void invokerRoutineDoesNotPinSearchPathOnPostgres() throws Exception {
+    void invokerRoutineInNamedSchemaPinsSearchPathOnPostgres() throws Exception {
         String sql = transpile("FlagOne.java", INVOKER_PROC, "postgresql");
         assertTrue(sql.contains("SECURITY INVOKER"), sql);
-        assertFalse(sql.contains("SET search_path"),
-                "an INVOKER routine runs with the caller's privileges and must not pin search_path; was:\n" + sql);
+        assertTrue(sql.contains("SET search_path = \"billing\", public, pg_temp"), sql);
     }
 
     @Test

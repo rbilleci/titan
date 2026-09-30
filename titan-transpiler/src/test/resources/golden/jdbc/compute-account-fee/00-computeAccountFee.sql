@@ -1,6 +1,7 @@
 CREATE OR REPLACE PROCEDURE "billing"."compute_account_fee"(p_account_id BIGINT, p_gold_rate NUMERIC(38,10), p_std_rate NUMERIC(38,10))
 LANGUAGE plpgsql
 SECURITY INVOKER
+SET search_path = "billing", public, pg_temp
 AS $$
 DECLARE
     v_balance NUMERIC(38,10);

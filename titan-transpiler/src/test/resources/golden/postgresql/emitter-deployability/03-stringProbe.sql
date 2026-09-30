@@ -2,6 +2,7 @@ CREATE OR REPLACE FUNCTION "test"."string_probe"(p_text TEXT, p_needle TEXT)
 RETURNS INTEGER
 LANGUAGE plpgsql
 SECURITY INVOKER
+SET search_path = "test", public, pg_temp
 AS $$
 DECLARE
     v_first TEXT;

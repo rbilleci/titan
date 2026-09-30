@@ -1,6 +1,7 @@
 CREATE OR REPLACE PROCEDURE "test"."apply_if_newer"(p_id INTEGER, p_new_version INTEGER, p_name TEXT)
 LANGUAGE plpgsql
 SECURITY INVOKER
+SET search_path = "test", public, pg_temp
 AS $$
 DECLARE
     v_current INTEGER;

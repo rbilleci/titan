@@ -3,6 +3,7 @@ package io.titan.gradle;
 import org.gradle.api.DefaultTask;
 import org.gradle.api.file.DirectoryProperty;
 import org.gradle.api.provider.Property;
+import org.gradle.api.provider.ListProperty;
 import org.gradle.api.tasks.Input;
 import org.gradle.api.tasks.InputDirectory;
 import org.gradle.api.tasks.OutputDirectory;
@@ -30,6 +31,10 @@ import java.util.stream.Stream;
 @DisableCachingByDefault(because = "Packaging preserves user migrations and shares verification metadata with install verification")
 public abstract class TitanPackageTask extends DefaultTask {
 
+    public TitanPackageTask() {
+        getAdditionalRuntimeSchemas().convention(List.of());
+    }
+
     // Titan-owned migrations are Flyway REPEATABLE migrations (R__ prefix): the emitted SQL is
     // CREATE-OR-REPLACE-shaped, so re-applying when the checksum changes is safe and no
     // previously-applied versioned migration is ever rewritten. Flyway runs repeatables in
@@ -51,6 +56,9 @@ public abstract class TitanPackageTask extends DefaultTask {
 
     @Input
     public abstract Property<String> getTitanVersion();
+
+    @Input
+    public abstract ListProperty<String> getAdditionalRuntimeSchemas();
 
     @OutputDirectory
     public abstract DirectoryProperty getOutputDir();
@@ -92,7 +100,8 @@ public abstract class TitanPackageTask extends DefaultTask {
 
             deleteLegacyTitanMigrations(dialectOutputDir);
 
-            String runtimeSql = TitanPackagedArtifacts.runtimeMigrationSqlForDialect(dialect);
+            String runtimeSql = TitanPackagedArtifacts.runtimeMigrationSqlForDialect(
+                    dialect, getAdditionalRuntimeSchemas().getOrElse(List.of()));
             if (!runtimeSql.isBlank()) {
                 Path runtimeMigrationPath = dialectOutputDir.resolve(RUNTIME_MIGRATION_FILE_NAME);
                 String runtimeMigrationWithVersion = withRuntimeVersion(runtimeSql, titanVersion);
@@ -127,7 +136,8 @@ public abstract class TitanPackageTask extends DefaultTask {
             Map<String, TitanArtifactMetadataFile.ArtifactRow> metadataRows =
                     TitanArtifactMetadataFile.read(inputRoot.resolve(TitanArtifactMetadataFile.FILE_NAME));
             TitanPackagedArtifacts.Result artifacts = TitanPackagedArtifacts.build(
-                    dialectInputs, inputRoot, mode, titanVersion, metadataRows);
+                    dialectInputs, inputRoot, mode, titanVersion, metadataRows,
+                    getAdditionalRuntimeSchemas().getOrElse(List.of()));
             TitanArtifactManifest manifest = artifacts.manifest();
             TitanObjectInventory objectInventory = artifacts.inventory();
             TitanInstallPlan installPlan = artifacts.installPlan();

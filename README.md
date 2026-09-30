@@ -103,6 +103,7 @@ Java entry point:
 CREATE OR REPLACE PROCEDURE "app"."reserve_stock"(p_order_id BIGINT, p_sku BIGINT, p_quantity INTEGER)
 LANGUAGE plpgsql
 SECURITY INVOKER
+SET search_path = "app", public, pg_temp
 AS $$
 DECLARE
     v_available INTEGER;
@@ -247,6 +248,7 @@ CREATE OR REPLACE FUNCTION "app"."monthly_charge_cents"(p_units INTEGER, p_partn
 RETURNS INTEGER
 LANGUAGE plpgsql
 SECURITY INVOKER
+SET search_path = "app", public, pg_temp
 AS $$
 DECLARE
     v_remaining INTEGER;

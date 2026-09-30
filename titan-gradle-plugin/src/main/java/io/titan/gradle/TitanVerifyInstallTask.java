@@ -5,6 +5,7 @@ import org.gradle.api.GradleException;
 import org.gradle.api.file.ConfigurableFileCollection;
 import org.gradle.api.file.DirectoryProperty;
 import org.gradle.api.provider.Property;
+import org.gradle.api.provider.ListProperty;
 import org.gradle.api.tasks.Classpath;
 import org.gradle.api.tasks.Internal;
 import org.gradle.api.tasks.TaskAction;
@@ -35,6 +36,10 @@ import java.util.Set;
 @DisableCachingByDefault(because = "Installs into and verifies a live database; results must never be replayed from cache")
 public abstract class TitanVerifyInstallTask extends DefaultTask {
 
+    public TitanVerifyInstallTask() {
+        getAdditionalRuntimeSchemas().convention(List.of());
+    }
+
     @Internal
     public abstract DirectoryProperty getSqlInputDir();
 
@@ -46,6 +51,9 @@ public abstract class TitanVerifyInstallTask extends DefaultTask {
 
     @Internal
     public abstract Property<String> getTitanVersion();
+
+    @Internal
+    public abstract ListProperty<String> getAdditionalRuntimeSchemas();
 
     @Internal
     public abstract Property<String> getJdbcUrl();
@@ -89,7 +97,8 @@ public abstract class TitanVerifyInstallTask extends DefaultTask {
         Map<String, TitanArtifactMetadataFile.ArtifactRow> metadataRows =
                 TitanArtifactMetadataFile.read(inputRoot.resolve(TitanArtifactMetadataFile.FILE_NAME));
         TitanPackagedArtifacts.Result artifacts = TitanPackagedArtifacts.build(
-                dialectInputs, inputRoot, mode, titanVersion, metadataRows);
+                dialectInputs, inputRoot, mode, titanVersion, metadataRows,
+                getAdditionalRuntimeSchemas().getOrElse(List.of()));
 
         TitanInstallVerification report;
         String configuredJdbcUrl = getJdbcUrl().getOrNull();

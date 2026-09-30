@@ -2,6 +2,7 @@ package io.titan.management;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.titan.management.ManagementAudit.AuditRecord;
@@ -382,6 +383,41 @@ class JdbcManagementStoreDogfoodIT {
     // ------------------------------------------------------------------
     // SEEDS + filtered/ordered reads.
     // ------------------------------------------------------------------
+
+    @ParameterizedTest
+    @EnumSource(Target.class)
+    void artifactGenerationSeedsDraftAndReferenceTogether(Target target) throws Exception {
+        DataSource dataSource = freshSchema(target);
+        TransactionalMutationStore store = new JdbcTransactionalMutationStore(dataSource);
+        Draft draft = draft("draft-generated", "ws-1", "model-demo", 1);
+        ArtifactRef artifact = artifactRef("artifact-generated", VerificationStatus.PASSED);
+
+        store.seedArtifactGeneration(draft, artifact);
+
+        TransactionalMutationStore reloaded = new JdbcTransactionalMutationStore(dataSource);
+        assertEquals(draft.id(), reloaded.draft(draft.id()).orElseThrow().id());
+        assertEquals(artifact.id(), reloaded.artifactRef(artifact.id()).orElseThrow().id());
+    }
+
+    @ParameterizedTest
+    @EnumSource(Target.class)
+    void callerTransactionCanRollBackArtifactGenerationSeeds(Target target) throws Exception {
+        DataSource dataSource = freshSchema(target);
+        JdbcTransactionalMutationStore store = new JdbcTransactionalMutationStore(dataSource);
+        Draft draft = draft("draft-rolled-back", "ws-1", "model-demo", 1);
+        ArtifactRef artifact = artifactRef("artifact-rolled-back", VerificationStatus.PASSED);
+
+        try (Connection connection = dataSource.getConnection()) {
+            assertThrows(SQLException.class, () -> store.seedArtifactGeneration(connection, draft, artifact));
+            connection.setAutoCommit(false);
+            store.seedArtifactGeneration(connection, draft, artifact);
+            connection.rollback();
+        }
+
+        JdbcTransactionalMutationStore reloaded = new JdbcTransactionalMutationStore(dataSource);
+        assertTrue(reloaded.draft(draft.id()).isEmpty());
+        assertTrue(reloaded.artifactRef(artifact.id()).isEmpty());
+    }
 
     @ParameterizedTest
     @EnumSource(Target.class)

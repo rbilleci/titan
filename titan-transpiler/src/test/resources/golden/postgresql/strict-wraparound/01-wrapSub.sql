@@ -2,6 +2,7 @@ CREATE OR REPLACE FUNCTION "test"."wrap_sub"(p_a INTEGER, p_b INTEGER)
 RETURNS INTEGER
 LANGUAGE plpgsql
 SECURITY INVOKER
+SET search_path = "test", public, pg_temp
 AS $$
 BEGIN
     -- titan:source:build/golden-fixtures/strict-wraparound.java:9

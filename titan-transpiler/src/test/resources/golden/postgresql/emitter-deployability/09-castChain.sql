@@ -2,6 +2,7 @@ CREATE OR REPLACE FUNCTION "test"."cast_chain"(p_small INTEGER, p_ratio DOUBLE P
 RETURNS BIGINT
 LANGUAGE plpgsql
 SECURITY INVOKER
+SET search_path = "test", public, pg_temp
 AS $$
 DECLARE
     v_widened BIGINT;

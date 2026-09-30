@@ -2,6 +2,7 @@ CREATE OR REPLACE FUNCTION "test"."int_ratio"(p_dividend INTEGER, p_divisor INTE
 RETURNS INTEGER
 LANGUAGE plpgsql
 SECURITY INVOKER
+SET search_path = "test", public, pg_temp
 AS $$
 BEGIN
     -- titan:source:build/golden-fixtures/emitter-deployability.java:235

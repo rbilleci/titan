@@ -2,6 +2,7 @@ CREATE OR REPLACE FUNCTION "test"."do_while_countdown"(p_start INTEGER)
 RETURNS INTEGER
 LANGUAGE plpgsql
 SECURITY INVOKER
+SET search_path = "test", public, pg_temp
 AS $$
 DECLARE
     v_total INTEGER;

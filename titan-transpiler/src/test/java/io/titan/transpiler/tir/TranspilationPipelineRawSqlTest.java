@@ -18,6 +18,39 @@ class TranspilationPipelineRawSqlTest {
     Path tempDir;
 
     @Test
+    void rejectsConditionalBindingThatEscapesItsBranch() throws Exception {
+        Path source = tempDir.resolve("EscapedConditionalBinding.java");
+        Files.writeString(source, """
+                import java.sql.Connection;
+                import java.sql.PreparedStatement;
+                import java.sql.SQLException;
+                import java.sql.Types;
+                import titan.dsl.StoredProcedure;
+
+                class EscapedConditionalBinding {
+                    @StoredProcedure
+                    static void run(Connection connection, boolean clear, String value) throws SQLException {
+                        PreparedStatement update = connection.prepareStatement(
+                                "UPDATE app.items SET value = ? WHERE id = 1");
+                        if (clear) {
+                            update.setNull(1, Types.VARCHAR);
+                        } else {
+                            update.setString(1, value);
+                        }
+                        update.executeUpdate();
+                    }
+                }
+                """);
+
+        IllegalArgumentException error = assertThrows(IllegalArgumentException.class,
+                () -> new TranspilationPipeline().transpile(
+                        List.of(source), List.of(), List.of("postgresql"), List.of("app"), true));
+
+        assertTrue(error.getMessage().contains("conditional PreparedStatement binding escapes its branch"),
+                error.getMessage());
+    }
+
+    @Test
     void emitsDialectValidNoOpsForEmptyIfElseIfAndElseBranches() throws Exception {
         Path source = tempDir.resolve("EmptyIfBranchDemo.java");
         Files.writeString(source, """

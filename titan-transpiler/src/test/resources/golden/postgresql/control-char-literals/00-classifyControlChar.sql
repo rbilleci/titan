@@ -2,6 +2,7 @@ CREATE OR REPLACE FUNCTION "test"."classify_control_char"(p_text TEXT)
 RETURNS INTEGER
 LANGUAGE plpgsql
 SECURITY INVOKER
+SET search_path = "test", public, pg_temp
 AS $$
 DECLARE
     v_first TEXT;

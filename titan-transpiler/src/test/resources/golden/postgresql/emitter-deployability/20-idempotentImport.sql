@@ -1,6 +1,7 @@
 CREATE OR REPLACE PROCEDURE "test"."idempotent_import"(p_id INTEGER, p_name TEXT, p_key TEXT)
 LANGUAGE plpgsql
 SECURITY INVOKER
+SET search_path = "test", public, pg_temp
 AS $$
 DECLARE
     v_already_applied BOOLEAN;

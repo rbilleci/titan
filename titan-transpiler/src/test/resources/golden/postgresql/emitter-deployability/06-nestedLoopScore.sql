@@ -2,6 +2,7 @@ CREATE OR REPLACE FUNCTION "test"."nested_loop_score"(p_rows INTEGER, p_cols INT
 RETURNS INTEGER
 LANGUAGE plpgsql
 SECURITY INVOKER
+SET search_path = "test", public, pg_temp
 AS $$
 DECLARE
     v_score INTEGER;

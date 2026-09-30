@@ -58,6 +58,107 @@ class TranspilationPipelineUnresolvedHelperTest {
     }
 
     @Test
+    void emitsReviewedHandlerFromAnotherSourceFileAsInternalRoutine() throws Exception {
+        Path entry = tempDir.resolve("DispatchFunction.java");
+        Path handler = tempDir.resolve("ReviewedHandler.java");
+        Files.writeString(entry, """
+                package example;
+                import titan.dsl.StoredFunction;
+
+                class DispatchFunction {
+                    @StoredFunction
+                    static int run(int value) {
+                        return ReviewedHandler.plusOne(value);
+                    }
+                }
+                """);
+        Files.writeString(handler, """
+                package example;
+
+                class ReviewedHandler {
+                    static int plusOne(int value) {
+                        return value + 1;
+                    }
+                }
+                """);
+
+        for (String dialect : List.of("postgresql", "mysql")) {
+            List<TranspilationPipeline.GeneratedSql> generated = new TranspilationPipeline().transpile(
+                    List.of(entry, handler), List.of(), List.of(dialect), List.of("public"), true);
+            String runSql = generated.stream()
+                    .filter(sql -> sql.methodName().equals("run"))
+                    .findFirst()
+                    .orElseThrow()
+                    .sql();
+            String handlerSql = generated.stream()
+                    .filter(sql -> sql.methodName().equals("plusOne"))
+                    .findFirst()
+                    .orElseThrow()
+                    .sql();
+
+            assertTrue(runSql.contains("__titan_internal_reviewed_handler_plus_one_"), runSql);
+            assertTrue(handlerSql.contains("plus_one"), handlerSql);
+        }
+    }
+
+    @Test
+    void emitsTransactionalJdbcHandlerFromAnotherSourceFile() throws Exception {
+        Path entry = tempDir.resolve("ProcedureDispatch.java");
+        Path handler = tempDir.resolve("ReviewedProcedure.java");
+        Files.writeString(entry, """
+                package example;
+                import java.sql.Connection;
+                import java.sql.SQLException;
+                import titan.dsl.StoredProcedure;
+
+                class ProcedureDispatch {
+                    @StoredProcedure
+                    static void run(Connection connection, long itemId, int delta) throws SQLException {
+                        ReviewedProcedure.apply(connection, itemId, delta);
+                    }
+                }
+                """);
+        Files.writeString(handler, """
+                package example;
+                import java.sql.Connection;
+                import java.sql.PreparedStatement;
+                import java.sql.SQLException;
+
+                class ReviewedProcedure {
+                    static void apply(Connection connection, long itemId, int delta) throws SQLException {
+                        PreparedStatement update = connection.prepareStatement(
+                                "UPDATE public.reviewed_items SET quantity = quantity + ? WHERE id = ?");
+                        update.setInt(1, delta);
+                        update.setLong(2, itemId);
+                        update.executeUpdate();
+                    }
+                }
+                """);
+
+        for (String dialect : List.of("postgresql", "mysql")) {
+            List<TranspilationPipeline.GeneratedSql> generated = new TranspilationPipeline().transpile(
+                    List.of(entry, handler), List.of(), List.of(dialect), List.of("public"), true);
+            String runSql = generated.stream()
+                    .filter(sql -> sql.methodName().equals("run"))
+                    .findFirst()
+                    .orElseThrow()
+                    .sql();
+            String handlerSql = generated.stream()
+                    .filter(sql -> sql.methodName().equals("apply"))
+                    .findFirst()
+                    .orElseThrow()
+                    .sql();
+
+            assertTrue(runSql.contains("__titan_internal_reviewed_procedure_apply_"), runSql);
+            assertTrue(runSql.contains("(p_item_id, p_delta)"), runSql);
+            assertTrue(!runSql.contains("(connection, p_item_id, p_delta)"), runSql);
+            assertTrue(handlerSql.contains("UPDATE public.reviewed_items SET quantity = quantity + "), handlerSql);
+            assertTrue(handlerSql.contains("p_delta"), handlerSql);
+            assertTrue(handlerSql.contains("p_item_id"), handlerSql);
+        }
+    }
+
+    @Test
     void omitsJdbcInfrastructureArgumentsFromInternalRoutineCalls() throws Exception {
         Path source = tempDir.resolve("JdbcInfrastructureHelperFunction.java");
         Files.writeString(source, """

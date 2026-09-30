@@ -29,7 +29,7 @@ final class TitanScratchDatabases {
     private static final String MYSQL_IMAGE = "mysql:8.4";
     private static final String SCRATCH_USER = "titan";
     private static final String SCRATCH_PASSWORD = "titan";
-    private static final String SCRATCH_DATABASE = "titan";
+    private static final String SCRATCH_DATABASE = "public";
     private static final String POSTGRES_HOST_PORT_ENV = "TITAN_SCRATCH_POSTGRES_HOST_PORT";
     private static final String MYSQL_HOST_PORT_ENV = "TITAN_SCRATCH_MYSQL_HOST_PORT";
     private static final Duration STARTUP_TIMEOUT = Duration.ofMinutes(3);

@@ -2,6 +2,7 @@ package io.titan.runtime.testing;
 
 import org.junit.jupiter.api.Test;
 
+import java.sql.Connection;
 import java.sql.ResultSet;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -43,6 +44,20 @@ class TitanTestExtensionIT {
                 .executeQuery("SELECT titan_rt_java_mod(5, 2)")) {
             rs.next();
             assertEquals(1L, rs.getLong(1));
+        }
+    }
+
+    @Test
+    void additionalConnectionsShareThePerTestDatabase(TitanTestContext context) throws Exception {
+        for (DatabaseTarget target : DatabaseTarget.values()) {
+            try (Connection additional = context.openAdditionalConnection(target)) {
+                assertNotNull(additional);
+                try (ResultSet rs = additional.createStatement()
+                        .executeQuery("SELECT COUNT(*) FROM titan_test_probe")) {
+                    rs.next();
+                    assertEquals(0, rs.getInt(1));
+                }
+            }
         }
     }
 }

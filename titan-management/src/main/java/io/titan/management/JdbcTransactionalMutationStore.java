@@ -122,6 +122,22 @@ public final class JdbcTransactionalMutationStore implements TransactionalMutati
         }
     }
 
+    public TransactionalCommandExecution execute(
+            Connection callerTransaction,
+            CommandInvocation invocation,
+            TransactionalCommandHandler handler,
+            Instant attemptAt,
+            Instant outcomeAt
+    ) throws SQLException {
+        Objects.requireNonNull(callerTransaction, "caller transaction");
+        Objects.requireNonNull(invocation, "command invocation");
+        Objects.requireNonNull(handler, "transactional command handler");
+        if (callerTransaction.getAutoCommit()) {
+            throw new SQLException("transactional command execution requires a caller-owned transaction");
+        }
+        return executeInTransaction(callerTransaction, invocation, handler, attemptAt, outcomeAt);
+    }
+
     private TransactionalCommandExecution executeInTransaction(
             Connection connection,
             CommandInvocation invocation,
@@ -246,46 +262,83 @@ public final class JdbcTransactionalMutationStore implements TransactionalMutati
     @Override
     public void seedDraft(Draft draft) {
         Objects.requireNonNull(draft, "draft");
-        inTransaction(connection -> {
-            try (PreparedStatement statement = connection.prepareStatement(
-                    "CALL " + ManagementJdbc.SCHEMA + ".seed_draft(?,?,?,?,?,?,?,?,?)")) {
-                statement.setString(1, draft.id());
-                statement.setString(2, draft.workspaceId());
-                statement.setString(3, draft.modelId());
-                statement.setInt(4, (int) draft.version());
-                statement.setString(5, draft.status().id());
-                statement.setString(6, "{}");
-                statement.setString(7, draft.documentHash());
-                statement.setString(8, draft.createdAt().toString());
-                statement.setString(9, draft.updatedAt().toString());
-                statement.execute();
-            }
-        });
+        inTransaction(connection -> seedDraft(connection, draft));
     }
 
     @Override
     public void seedArtifactRef(ArtifactRef artifactRef) {
         Objects.requireNonNull(artifactRef, "artifact ref");
-        inTransaction(connection -> {
-            try (PreparedStatement statement = connection.prepareStatement(
-                    "CALL " + ManagementJdbc.SCHEMA + ".seed_artifact_ref(?,?,?,?,?,?,?,?)")) {
-                statement.setString(1, artifactRef.id());
-                statement.setString(2, artifactRef.artifactId());
-                statement.setString(3, artifactRef.artifactHash());
-                statement.setString(4, artifactRef.manifestPath());
-                statement.setString(5, artifactRef.objectInventoryPath());
-                statement.setString(6, artifactRef.installPlanPath());
-                statement.setString(7, artifactRef.installVerificationPath());
-                statement.setString(8, artifactRef.verificationStatus().id());
-                statement.execute();
-            }
-            // The seed routine carries only the base artifact columns; the GAP-005 evidence columns
-            // (package_mode, dialect, *_hash) are part of the durable contract the activation
-            // precondition reads, so write them with a follow-on UPDATE in the same transaction.
-            if (artifactRef.packageMode() != null) {
-                updateArtifactEvidence(connection, artifactRef);
-            }
-        });
+        inTransaction(connection -> seedArtifactRef(connection, artifactRef));
+    }
+
+    @Override
+    public void seedArtifactGeneration(Draft draft, ArtifactRef artifactRef) {
+        Objects.requireNonNull(draft, "draft");
+        Objects.requireNonNull(artifactRef, "artifact ref");
+        inTransaction(connection -> seedArtifactGeneration(connection, draft, artifactRef));
+    }
+
+    public void seedArtifactGeneration(Connection connection, Draft draft, ArtifactRef artifactRef) throws SQLException {
+        requireCallerTransaction(connection);
+        Objects.requireNonNull(draft, "draft");
+        Objects.requireNonNull(artifactRef, "artifact ref");
+        seedArtifactRef(connection, artifactRef);
+        seedDraft(connection, draft);
+    }
+
+    public void seedDraft(Connection connection, Draft draft) throws SQLException {
+        requireCallerTransaction(connection);
+        Objects.requireNonNull(draft, "draft");
+        try (PreparedStatement statement = connection.prepareStatement(
+                "CALL " + ManagementJdbc.SCHEMA + ".seed_draft(?,?,?,?,?,?,?,?,?)")) {
+            statement.setString(1, draft.id());
+            statement.setString(2, draft.workspaceId());
+            statement.setString(3, draft.modelId());
+            statement.setInt(4, (int) draft.version());
+            statement.setString(5, draft.status().id());
+            statement.setString(6, "{}");
+            statement.setString(7, draft.documentHash());
+            statement.setString(8, draft.createdAt().toString());
+            statement.setString(9, draft.updatedAt().toString());
+            statement.execute();
+        }
+    }
+
+    public void transitionDraftStatus(Connection connection, Draft draft) throws SQLException {
+        requireCallerTransaction(connection);
+        Objects.requireNonNull(draft, "draft");
+        try (PreparedStatement statement = connection.prepareStatement(
+                "CALL " + ManagementJdbc.SCHEMA + ".transition_draft_status(?,?,?)")) {
+            statement.setString(1, draft.id());
+            statement.setString(2, draft.status().id());
+            statement.setString(3, draft.updatedAt().toString());
+            statement.execute();
+        }
+    }
+
+    private static void requireCallerTransaction(Connection connection) throws SQLException {
+        Objects.requireNonNull(connection, "connection");
+        if (connection.getAutoCommit()) {
+            throw new SQLException("management write requires a caller-owned transaction");
+        }
+    }
+
+    private void seedArtifactRef(Connection connection, ArtifactRef artifactRef) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement(
+                "CALL " + ManagementJdbc.SCHEMA + ".seed_artifact_ref(?,?,?,?,?,?,?,?)")) {
+            statement.setString(1, artifactRef.id());
+            statement.setString(2, artifactRef.artifactId());
+            statement.setString(3, artifactRef.artifactHash());
+            statement.setString(4, artifactRef.manifestPath());
+            statement.setString(5, artifactRef.objectInventoryPath());
+            statement.setString(6, artifactRef.installPlanPath());
+            statement.setString(7, artifactRef.installVerificationPath());
+            statement.setString(8, artifactRef.verificationStatus().id());
+            statement.execute();
+        }
+        if (artifactRef.packageMode() != null) {
+            updateArtifactEvidence(connection, artifactRef);
+        }
     }
 
     private void updateArtifactEvidence(Connection connection, ArtifactRef artifactRef) throws SQLException {

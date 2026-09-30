@@ -14,6 +14,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.regex.Pattern;
 
 /**
  * Builds the artifact manifest, object inventory and install plan from the transpiler's
@@ -32,6 +33,7 @@ import java.util.Map;
 final class TitanPackagedArtifacts {
 
     static final String DEFAULT_SCHEMA = "public";
+    private static final Pattern RUNTIME_SCHEMA = Pattern.compile("[A-Za-z][A-Za-z0-9_]*");
 
     /** One dialect's SQL input files (the transpile output directory layout). */
     record DialectInput(String dialect, List<Path> sqlFiles) {
@@ -84,10 +86,65 @@ final class TitanPackagedArtifacts {
                 .orElse("");
     }
 
+    static String runtimeMigrationSqlForDialect(String dialect, List<String> additionalRuntimeSchemas) {
+        String runtimeSql = runtimeMigrationSqlForDialect(dialect);
+        List<String> schemas = runtimeSchemas(dialect, additionalRuntimeSchemas);
+        if (schemas.isEmpty()) {
+            return runtimeSql;
+        }
+        StringBuilder sql = new StringBuilder("CREATE DATABASE IF NOT EXISTS `")
+                .append(DEFAULT_SCHEMA).append("`;\nUSE `").append(DEFAULT_SCHEMA).append("`;\n")
+                .append(runtimeSql);
+        for (String schema : schemas) {
+            sql.append("\nCREATE DATABASE IF NOT EXISTS `").append(schema).append("`;\n")
+                    .append("USE `").append(schema).append("`;\n")
+                    .append(runtimeSql)
+                    .append("\nUSE `").append(DEFAULT_SCHEMA).append("`;\n");
+        }
+        return sql.toString();
+    }
+
     static List<SqlObject> runtimeObjectsForDialect(String dialect) {
         return DialectId.parse(dialect)
                 .map(dialectId -> new DialectProviders().require(dialectId).runtimeStrategy().runtimeObjects())
                 .orElse(List.of());
+    }
+
+    static List<SqlObject> runtimeObjectsForDialect(String dialect, List<String> additionalRuntimeSchemas) {
+        List<SqlObject> base = runtimeObjectsForDialect(dialect);
+        List<String> schemas = runtimeSchemas(dialect, additionalRuntimeSchemas);
+        if (schemas.isEmpty()) {
+            return base;
+        }
+        List<SqlObject> objects = new ArrayList<>(base);
+        for (String schema : schemas) {
+            for (SqlObject object : base) {
+                if (object.schema().isBlank()) {
+                    objects.add(new SqlObject(object.kind(), schema, object.name(), object.parameters(),
+                            object.returnType(), object.onTable()));
+                }
+            }
+        }
+        return List.copyOf(objects);
+    }
+
+    private static List<String> runtimeSchemas(String dialect, List<String> additionalRuntimeSchemas) {
+        if (additionalRuntimeSchemas == null || additionalRuntimeSchemas.isEmpty()) {
+            return List.of();
+        }
+        if (!"mysql".equalsIgnoreCase(dialect)) {
+            throw new IllegalArgumentException("additional runtime schemas require the mysql dialect");
+        }
+        List<String> schemas = new ArrayList<>();
+        for (String schema : additionalRuntimeSchemas) {
+            if (schema == null || !RUNTIME_SCHEMA.matcher(schema).matches()) {
+                throw new IllegalArgumentException("invalid additional runtime schema: " + schema);
+            }
+            if (!schema.equalsIgnoreCase(DEFAULT_SCHEMA) && !schemas.contains(schema)) {
+                schemas.add(schema);
+            }
+        }
+        return List.copyOf(schemas);
     }
 
     static String runtimeNamespaceForDialect(String dialect) {
@@ -103,6 +160,17 @@ final class TitanPackagedArtifacts {
             String titanVersion,
             Map<String, TitanArtifactMetadataFile.ArtifactRow> metadataRows
     ) throws IOException {
+        return build(dialectInputs, inputRoot, mode, titanVersion, metadataRows, List.of());
+    }
+
+    static Result build(
+            List<DialectInput> dialectInputs,
+            Path inputRoot,
+            String mode,
+            String titanVersion,
+            Map<String, TitanArtifactMetadataFile.ArtifactRow> metadataRows,
+            List<String> additionalRuntimeSchemas
+    ) throws IOException {
         List<TitanArtifactManifest.SourceInput> sourceInputs = new ArrayList<>();
         List<PendingObject> pendingObjects = new ArrayList<>();
         Map<String, EntryPointBuilder> entryPointBuilders = new LinkedHashMap<>();
@@ -115,11 +183,11 @@ final class TitanPackagedArtifacts {
             dialects.add(dialect);
 
             if (mode.equals("migration")) {
-                String runtimeSql = runtimeMigrationSqlForDialect(dialect);
+                String runtimeSql = runtimeMigrationSqlForDialect(dialect, additionalRuntimeSchemas);
                 if (!runtimeSql.isBlank()) {
                     String runtimeHash = TitanArtifactHashes.objectSqlSha256(runtimeSql);
                     String runtimePath = dialect + "/" + TitanPackageTask.RUNTIME_MIGRATION_FILE_NAME;
-                    List<SqlObject> runtimeObjects = runtimeObjectsForDialect(dialect);
+                    List<SqlObject> runtimeObjects = runtimeObjectsForDialect(dialect, additionalRuntimeSchemas);
                     for (int index = 0; index < runtimeObjects.size(); index++) {
                         pendingObjects.add(PendingObject.forSqlObject(
                                 dialect,

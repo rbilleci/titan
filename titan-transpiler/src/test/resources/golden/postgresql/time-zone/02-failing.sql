@@ -2,6 +2,7 @@ CREATE OR REPLACE FUNCTION "test"."failing"(p_value INTEGER)
 RETURNS INTEGER
 LANGUAGE plpgsql
 SECURITY INVOKER
+SET search_path = "test", public, pg_temp
 AS $$
 BEGIN
     IF COALESCE((p_value < 0), FALSE) THEN

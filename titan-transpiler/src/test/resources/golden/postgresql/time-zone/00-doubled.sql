@@ -2,6 +2,7 @@ CREATE OR REPLACE FUNCTION "test"."doubled"(p_value INTEGER)
 RETURNS INTEGER
 LANGUAGE plpgsql
 SECURITY INVOKER
+SET search_path = "test", public, pg_temp
 AS $$
 BEGIN
     -- titan:source:build/golden-fixtures/time-zone.java:8

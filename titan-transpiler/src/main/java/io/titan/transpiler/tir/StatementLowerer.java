@@ -1108,9 +1108,8 @@ final class StatementLowerer {
         if (callee == null) {
             callee = LowererSupport.invocationName(invocation);
         }
-        List<ExpressionNode> args = invocation.getArguments().stream()
-                .map(arg -> ExpressionLowerer.lowerExpression(arg, parsedSources))
-                .toList();
+        List<ExpressionNode> args = ExpressionLowerer.lowerRoutineArguments(
+                invocation, LowererSupport.resolvedMethodElement(invocationPath, parsedSources), parsedSources);
         return new CallStatement(callee, args);
     }
 

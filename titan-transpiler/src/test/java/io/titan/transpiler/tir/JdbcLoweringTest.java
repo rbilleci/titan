@@ -128,6 +128,31 @@ class JdbcLoweringTest {
     }
 
     @Test
+    void i4ThenBlockRejectsAssignmentsThatWouldBeDropped() throws Exception {
+        LowerResult result = lowerCollecting("ThenReadSideEffect", """
+                class ThenReadSideEffect {
+                    @StoredFunction
+                    public static String run(Connection c, long id) throws SQLException {
+                        PreparedStatement ps = c.prepareStatement("SELECT tier FROM accounts WHERE id = ?");
+                        ps.setLong(1, id);
+                        ResultSet rs = ps.executeQuery();
+                        String tier = "";
+                        boolean found = false;
+                        if (rs.next()) {
+                            tier = rs.getString("tier");
+                            found = true;
+                        }
+                        return found ? tier : "missing";
+                    }
+                }
+                """, io.titan.transpiler.jdbc.SqlSafetyMode.STRICT, List.of(DialectId.POSTGRESQL));
+        assertTrue(result.sink().errors().stream().anyMatch(d ->
+                        d.code() == TitanErrorCode.E001
+                                && d.message().contains("single-row read if (rs.next()) block contains a statement")),
+                "an assignment omitted from SELECT INTO must fail lowering: " + result.sink().errors());
+    }
+
+    @Test
     void conditionalBranchContainingJdbcReadLowersThroughJdbcPath() throws Exception {
         // A database-resident request engine chooses its root-field read only after parsing the request.
         // The containing conditional is not itself a JDBC shape, but its branch must still be lowered by
@@ -876,11 +901,11 @@ class JdbcLoweringTest {
                         PreparedStatement ps = c.prepareStatement("SELECT tier FROM accounts WHERE id = ?");
                         ps.setLong(1, id);
                         ResultSet rs = ps.executeQuery();
+                        String tier = "";
                         if (rs.next()) {
-                            String tier = rs.getString("tier");
-                            return tier;
+                            tier = rs.getString("tier");
                         }
-                        return null;
+                        return tier;
                     }
                 }
                 """, io.titan.transpiler.jdbc.SqlSafetyMode.STRICT, List.of(DialectId.MYSQL));
@@ -1042,11 +1067,11 @@ class JdbcLoweringTest {
                         PreparedStatement ps = c.prepareStatement("SELECT tier FROM accounts WHERE id = ?");
                         ps.setLong(1, id);
                         ResultSet rs = ps.executeQuery();
+                        String tier = "";
                         if (rs.next()) {
-                            String tier = rs.getString("tier");
-                            return tier;
+                            tier = rs.getString("tier");
                         }
-                        return null;
+                        return tier;
                     }
                 }
                 """, io.titan.transpiler.jdbc.SqlSafetyMode.STRICT, List.of(DialectId.POSTGRESQL));

@@ -2,6 +2,7 @@ CREATE OR REPLACE FUNCTION "test"."try_side_effects"(p_explode BOOLEAN)
 RETURNS TEXT
 LANGUAGE plpgsql
 SECURITY INVOKER
+SET search_path = "test", public, pg_temp
 AS $$
 DECLARE
     v_result TEXT;

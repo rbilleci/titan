@@ -525,7 +525,7 @@ final class ExpressionLowerer {
      * signature because the called routine executes in the same database session. Calls must apply
      * the identical positional omission or the SQL invocation and declaration arities diverge.</p>
      */
-    private static List<ExpressionNode> lowerRoutineArguments(
+    static List<ExpressionNode> lowerRoutineArguments(
             MethodInvocationTree invocation,
             ExecutableElement resolvedMethod,
             ParsedSources parsedSources

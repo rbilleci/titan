@@ -74,6 +74,16 @@ public final class ManagementSchemaInstaller {
         Objects.requireNonNull(connection, "connection");
         Objects.requireNonNull(dialect, "dialect");
         applyScript(connection, loadSchema(dialect));
+        installRoutines(connection, dialect);
+    }
+
+    public static List<String> schemaStatements(Dialect dialect) {
+        return List.copyOf(SqlScripts.split(loadSchema(dialect)));
+    }
+
+    public static void installRoutines(Connection connection, Dialect dialect) throws SQLException {
+        Objects.requireNonNull(connection, "connection");
+        Objects.requireNonNull(dialect, "dialect");
         applyScript(connection, loadRoutines(dialect));
     }
 

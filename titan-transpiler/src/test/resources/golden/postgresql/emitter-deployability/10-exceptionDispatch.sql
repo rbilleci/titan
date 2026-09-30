@@ -2,6 +2,7 @@ CREATE OR REPLACE FUNCTION "test"."exception_dispatch"(p_code INTEGER)
 RETURNS TEXT
 LANGUAGE plpgsql
 SECURITY INVOKER
+SET search_path = "test", public, pg_temp
 AS $$
 DECLARE
     v_result TEXT;

@@ -2,6 +2,7 @@ CREATE OR REPLACE FUNCTION "test"."switch_score"(p_input INTEGER)
 RETURNS INTEGER
 LANGUAGE plpgsql
 SECURITY INVOKER
+SET search_path = "test", public, pg_temp
 AS $$
 DECLARE
     v_score INTEGER;

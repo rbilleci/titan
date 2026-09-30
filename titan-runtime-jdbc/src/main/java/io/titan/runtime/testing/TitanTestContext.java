@@ -1,6 +1,7 @@
 package io.titan.runtime.testing;
 
 import java.sql.Connection;
+import java.sql.SQLException;
 import java.util.EnumMap;
 import java.util.Map;
 
@@ -13,9 +14,19 @@ import java.util.Map;
  */
 public final class TitanTestContext {
     private final Map<DatabaseTarget, Connection> connections;
+    private final AdditionalConnectionProvider additionalConnectionProvider;
 
-    TitanTestContext(Map<DatabaseTarget, Connection> connections) {
+    @FunctionalInterface
+    interface AdditionalConnectionProvider {
+        Connection open(DatabaseTarget target) throws SQLException;
+    }
+
+    TitanTestContext(
+            Map<DatabaseTarget, Connection> connections,
+            AdditionalConnectionProvider additionalConnectionProvider
+    ) {
         this.connections = new EnumMap<>(connections);
+        this.additionalConnectionProvider = additionalConnectionProvider;
     }
 
     public Connection connection(DatabaseTarget target) {
@@ -28,6 +39,11 @@ public final class TitanTestContext {
 
     public Map<DatabaseTarget, Connection> allConnections() {
         return Map.copyOf(connections);
+    }
+
+    public Connection openAdditionalConnection(DatabaseTarget target) throws SQLException {
+        connection(target);
+        return additionalConnectionProvider.open(target);
     }
 
     public JavaModeRunner javaMode(DatabaseTarget target) {

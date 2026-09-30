@@ -1266,6 +1266,7 @@ final class JdbcStatementLowerer {
         StatementState state = statementStateFor(receiverExpr, path);
         switch (name) {
             case "executeUpdate", "executeLargeUpdate", "execute" -> {
+                rejectEscapedConditionalBindings(state, path);
                 // I-7 (§6.3): a RETURN_GENERATED_KEYS INSERT recovers the inserted row's auto-increment
                 // key. When the key column resolves from the Catalog, the INSERT + key read lower
                 // together to a single GeneratedKeyReadStatement (PG INSERT ... RETURNING <col> INTO,
@@ -1283,6 +1284,7 @@ final class JdbcStatementLowerer {
                 return JdbcDisposition.HANDLED;
             }
             case "executeQuery" -> {
+                rejectEscapedConditionalBindings(state, path);
                 // I-3 read execution; the result shape (I-4/I-5) is lowered at the consuming if/while,
                 // not here. Gate the SQL at the call site (mirroring the recognizer) so an executeQuery
                 // whose ResultSet is never consumed by an if/while is still gated — otherwise a splice
@@ -1296,7 +1298,7 @@ final class JdbcStatementLowerer {
             }
             default -> {
                 if (name.startsWith("set") && state != null) {
-                    recordBinding(invocation, state);
+                    recordBinding(invocation, state, path);
                 }
                 // setXxx / clearParameters / close / getGeneratedKeys: no statement emitted.
                 return JdbcDisposition.HANDLED;
@@ -1350,7 +1352,7 @@ final class JdbcStatementLowerer {
                 + "(docs/transpilable-jdbc-subset.md §5.2)");
     }
 
-    private void recordBinding(MethodInvocationTree invocation, StatementState state) {
+    private void recordBinding(MethodInvocationTree invocation, StatementState state, TreePath path) {
         List<? extends ExpressionTree> args = invocation.getArguments();
         if (args.size() < 2) {
             return;
@@ -1360,11 +1362,39 @@ final class JdbcStatementLowerer {
             return;
         }
         state.binds.put(ordinal, args.get(1));
+        state.bindBranches.put(ordinal, conditionalBranches(path));
         if (inlineHelperDepth > 0) {
             ExpressionTree value = args.get(1);
             state.inlineBindValues.put(ordinal, ExpressionLowerer.lowerExpression(value, parsed));
             state.inlineBindTypes.put(ordinal, safeMap(typeOfBind(value)));
         }
+    }
+
+    private void rejectEscapedConditionalBindings(StatementState state, TreePath executionPath) {
+        if (state == null) {
+            return;
+        }
+        List<Tree> executionBranches = conditionalBranches(executionPath);
+        for (List<Tree> bindingBranches : state.bindBranches.values()) {
+            if (!executionBranches.containsAll(bindingBranches)) {
+                diagnostics.error("conditional PreparedStatement binding escapes its branch; bind all parameters "
+                        + "before execution or execute within the same branch");
+                return;
+            }
+        }
+    }
+
+    private static List<Tree> conditionalBranches(TreePath path) {
+        List<Tree> branches = new ArrayList<>();
+        TreePath child = path;
+        for (TreePath parent = path.getParentPath(); parent != null; child = parent, parent = parent.getParentPath()) {
+            if (parent.getLeaf() instanceof IfTree ifTree
+                    && (child.getLeaf() == ifTree.getThenStatement()
+                    || child.getLeaf() == ifTree.getElseStatement())) {
+                branches.add(child.getLeaf());
+            }
+        }
+        return branches;
     }
 
     // ---- (3) I-4 single-row reads ----
@@ -1406,7 +1436,12 @@ final class JdbcStatementLowerer {
             }
         }
         List<String> intoTargets = new ArrayList<>();
-        collectReads(thenStatements, enclosing, intoTargets, declarations);
+        if (!collectReads(thenStatements, enclosing, intoTargets, declarations)) {
+            diagnostics.error("TITAN-E001: a single-row read if (rs.next()) block contains a statement "
+                    + "that cannot be lowered. Keep only ResultSet column assignments in the block; "
+                    + "project a non-null row marker for presence checks or use a supported cursor shape.");
+            return;
+        }
         if (intoTargets.isEmpty()) {
             diagnostics.error("TITAN-E001: a single-row read if (rs.next()) { … } produced no column reads to "
                     + "assign; the block must contain at least one `local = rs.getX(col)` / "
@@ -1471,7 +1506,7 @@ final class JdbcStatementLowerer {
     }
 
     /** Collects {@code <local> = rs.getX(col)} / {@code Type <local> = rs.getX(col)} reads in order. */
-    private void collectReads(
+    private boolean collectReads(
             List<? extends StatementTree> readStatements,
             TreePath enclosingPath,
             List<String> intoTargets,
@@ -1480,10 +1515,12 @@ final class JdbcStatementLowerer {
         for (StatementTree statement : readStatements) {
             TreePath statementPath = new TreePath(enclosingPath, statement);
             String target = readTargetOf(statement, statementPath, null, declarations);
-            if (target != null) {
-                intoTargets.add(target);
+            if (target == null) {
+                return false;
             }
+            intoTargets.add(target);
         }
+        return true;
     }
 
     /** True if {@code statement} is {@code return rs.getX(col);} — a direct return of a column read (ATG-001). */
@@ -2525,6 +2562,7 @@ final class JdbcStatementLowerer {
     private static final class StatementState {
         ExpressionTree sqlArg;
         final Map<Integer, ExpressionTree> binds = new LinkedHashMap<>();
+        final Map<Integer, List<Tree>> bindBranches = new LinkedHashMap<>();
         /** Pre-lowered bind values captured while an inline helper's substitutions are active. */
         final Map<Integer, ExpressionNode> inlineBindValues = new LinkedHashMap<>();
         final Map<Integer, TirType> inlineBindTypes = new LinkedHashMap<>();
